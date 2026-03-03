@@ -1,0 +1,292 @@
+---
+title: 'Workflow Versioning'
+description: 'Learn how to version your workflows for safe deployment and backward compatibility'
+icon: 'code-branch'
+---
+
+## Overview
+
+Workflow versioning allows you to safely deploy changes to your workflow logic while maintaining backward compatibility with running workflow instances. This is critical for long-running workflows that may span days, weeks, or months.
+
+## Why Versioning Matters
+
+When you modify workflow code, existing running instances use the workflow history to replay their state. Without versioning, code changes can cause:
+
+- Replay inconsistencies
+- Unexpected behavior in running workflows
+- Failed workflow executions
+- Data corruption
+
+Versioning ensures that workflow changes are deterministic and safe.
+
+## Using getVersion
+
+The `getVersion()` method allows you to branch your workflow logic based on version numbers:
+
+```php
+use Workflow\Workflow;
+
+class OrderWorkflow extends Workflow
+{
+    public function execute($orderId)
+    {
+        $version = yield self::getVersion(
+            changeId: 'add-fraud-check',
+            minSupported: 1,
+            maxSupported: 2
+        );
+
+        if ($version === 1) {
+            // Original logic
+            yield $this->processPayment($orderId);
+        } else {
+            // New logic with fraud check
+            yield $this->checkForFraud($orderId);
+            yield $this->processPayment($orderId);
+        }
+
+        yield $this->shipOrder($orderId);
+    }
+}
+```
+
+## Method Signature
+
+```php
+public static function getVersion(
+    string $changeId,
+    int $minSupported = self::DEFAULT_VERSION,
+    int $maxSupported = 1
+): PromiseInterface
+```
+
+### Parameters
+
+<ParamField path="changeId" type="string" required>
+  A unique identifier for this version change. Use descriptive names like `add-fraud-check` or `update-payment-api`.
+</ParamField>
+
+<ParamField path="minSupported" type="int" default="1">
+  The minimum version that is still supported. Workflows below this version will throw a `VersionNotSupportedException`.
+</ParamField>
+
+<ParamField path="maxSupported" type="int" default="1">
+  The maximum (current) version. New workflow executions will use this version.
+</ParamField>
+
+## How It Works
+
+From the source code at `src/Traits/Versions.php:15-69`:
+
+1. **First Execution**: When a workflow first executes, it logs the `maxSupported` version
+2. **Replay**: On replay, it retrieves the logged version and validates it's within the supported range
+3. **Version Validation**: If the version is outside the `[minSupported, maxSupported]` range, a `VersionNotSupportedException` is thrown
+
+## Version Evolution Strategy
+
+### Step 1: Add New Code Path
+
+When adding new functionality:
+
+```php
+$version = yield self::getVersion('add-notification', 1, 2);
+
+if ($version === 1) {
+    // Old path - no notification
+    yield $this->processOrder();
+} else {
+    // New path - with notification
+    yield $this->processOrder();
+    yield $this->sendNotification();
+}
+```
+
+### Step 2: Wait for Old Workflows to Complete
+
+Monitor your running workflows. Once all workflows using version 1 have completed:
+
+```php
+// Check for running workflows on old version
+$runningOldWorkflows = StoredWorkflow::where('status', 'running')
+    ->where('created_at', '<', now()->subDays(30))
+    ->count();
+```
+
+### Step 3: Remove Old Code Path
+
+Once safe, remove the old version:
+
+```php
+$version = yield self::getVersion('add-notification', 2, 2);
+
+// Only version 2 is supported now
+yield $this->processOrder();
+yield $this->sendNotification();
+```
+
+### Step 4: Simplify (Optional)
+
+After all workflows are on version 2, you can remove versioning for this change:
+
+```php
+// Simply use the new code
+yield $this->processOrder();
+yield $this->sendNotification();
+```
+
+## Multiple Version Changes
+
+You can have multiple version branches in a single workflow:
+
+```php
+public function execute($orderId)
+{
+    $paymentVersion = yield self::getVersion('new-payment-provider', 1, 2);
+    $shippingVersion = yield self::getVersion('updated-shipping-api', 1, 3);
+
+    if ($paymentVersion === 1) {
+        yield $this->oldPaymentFlow($orderId);
+    } else {
+        yield $this->newPaymentFlow($orderId);
+    }
+
+    if ($shippingVersion === 1) {
+        yield $this->legacyShipping($orderId);
+    } elseif ($shippingVersion === 2) {
+        yield $this->updatedShipping($orderId);
+    } else {
+        yield $this->latestShipping($orderId);
+    }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Descriptive Change IDs">
+    Choose meaningful names that describe the change:
+    - ✅ `add-fraud-check`
+    - ✅ `migrate-to-stripe-api-v3`
+    - ❌ `change1`
+    - ❌ `update`
+  </Accordion>
+
+  <Accordion title="Increment Versions Gradually">
+    Increase `maxSupported` by 1 for each change:
+    ```php
+    // First change
+    yield self::getVersion('feature-a', 1, 2);
+    
+    // After feature-a is deployed
+    yield self::getVersion('feature-a', 2, 3);
+    ```
+  </Accordion>
+
+  <Accordion title="Don't Reuse Change IDs">
+    Each version branch should have a unique `changeId`:
+    ```php
+    // ❌ Don't do this
+    yield self::getVersion('update', 1, 2); // First change
+    yield self::getVersion('update', 1, 2); // Different change!
+    
+    // ✅ Do this instead
+    yield self::getVersion('add-fraud-check', 1, 2);
+    yield self::getVersion('update-payment-api', 1, 2);
+    ```
+  </Accordion>
+
+  <Accordion title="Test Both Paths">
+    Write tests for all version branches:
+    ```php
+    public function test_workflow_v1()
+    {
+        // Test old behavior
+    }
+    
+    public function test_workflow_v2()
+    {
+        // Test new behavior
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Exception Handling
+
+If a workflow tries to use an unsupported version:
+
+```php
+use Workflow\Exceptions\VersionNotSupportedException;
+
+try {
+    $stub = WorkflowStub::load($workflowId);
+    yield $stub->result();
+} catch (VersionNotSupportedException $e) {
+    // Version 0 for change ID 'add-fraud-check' is not supported.
+    // Supported range: [1, 3]
+    Log::error('Workflow version not supported', [
+        'workflow_id' => $workflowId,
+        'error' => $e->getMessage(),
+    ]);
+}
+```
+
+## Implementation Details
+
+The versioning system (from `src/Traits/Versions.php:20-68`):
+
+1. Checks the workflow log for an existing version entry by index
+2. If found during replay, validates it's within `[minSupported, maxSupported]`
+3. If not found (first execution), logs the `maxSupported` version
+4. Handles race conditions using database constraints
+5. Returns a resolved promise with the version number
+
+## Common Patterns
+
+### Gradual Feature Rollout
+
+```php
+$version = yield self::getVersion('new-feature', 1, 2);
+
+if ($version === 2 && $this->isFeatureEnabled()) {
+    yield $this->newFeature();
+} else {
+    yield $this->oldFeature();
+}
+```
+
+### API Migration
+
+```php
+$apiVersion = yield self::getVersion('stripe-api-upgrade', 1, 2);
+
+if ($apiVersion === 1) {
+    $client = new StripeClient(['api_version' => '2020-08-27']);
+} else {
+    $client = new StripeClient(['api_version' => '2023-10-16']);
+}
+
+yield $this->processPayment($client, $amount);
+```
+
+### Database Schema Changes
+
+```php
+$schemaVersion = yield self::getVersion('add-user-preferences', 1, 2);
+
+$user = User::find($userId);
+
+if ($schemaVersion === 1) {
+    // Old schema - preferences in JSON column
+    $preferences = json_decode($user->settings);
+} else {
+    // New schema - preferences in separate table
+    $preferences = $user->preferences;
+}
+```
+
+## Related Topics
+
+- [Error Handling](/advanced/error-handling) - Handle version exceptions
+- [Middleware](/advanced/middleware) - Version-aware middleware
+- [Workflows](/concepts/workflows) - Basic workflow concepts

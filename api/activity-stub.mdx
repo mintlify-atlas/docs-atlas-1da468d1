@@ -1,0 +1,408 @@
+---
+title: ActivityStub
+description: Interface for dispatching and managing activities within workflows
+---
+
+## Overview
+
+The `ActivityStub` class provides methods for executing activities from within workflows. Activities represent individual units of work that can fail and retry independently, making them ideal for operations like API calls, database updates, or external service interactions.
+
+## Static Methods
+
+### make()
+
+```php
+public static function make($activity, ...$arguments): PromiseInterface
+```
+
+Dispatches an activity and returns a promise that resolves when the activity completes.
+
+<ParamField path="activity" type="string" required>
+  The fully qualified activity class name
+</ParamField>
+
+<ParamField path="arguments" type="mixed" required>
+  Variable arguments passed to the activity's execute method
+</ParamField>
+
+**Returns:** `PromiseInterface` that resolves to the activity's return value
+
+### Example
+
+```php
+use Workflow\Workflow;
+use Workflow\ActivityStub;
+
+class OrderWorkflow extends Workflow
+{
+    public function execute(Order $order)
+    {
+        // Execute a single activity
+        $paymentResult = yield ActivityStub::make(
+            ProcessPaymentActivity::class,
+            $order->amount,
+            $order->paymentMethod
+        );
+
+        // Execute another activity
+        $confirmationEmail = yield ActivityStub::make(
+            SendEmailActivity::class,
+            $order->customer->email,
+            'payment_confirmed'
+        );
+
+        return [
+            'payment' => $paymentResult,
+            'confirmation' => $confirmationEmail,
+        ];
+    }
+}
+```
+
+### all()
+
+```php
+public static function all(iterable $promises): PromiseInterface
+```
+
+Waits for all activity promises to complete and returns their results as an array.
+
+<ParamField path="promises" type="iterable" required>
+  An iterable collection of activity promises
+</ParamField>
+
+**Returns:** `PromiseInterface` that resolves to an array of results
+
+### Example
+
+```php
+use Workflow\Workflow;
+use Workflow\ActivityStub;
+
+class BatchProcessingWorkflow extends Workflow
+{
+    public function execute(array $items)
+    {
+        // Start multiple activities in parallel
+        $promises = [];
+        foreach ($items as $item) {
+            $promises[] = ActivityStub::make(
+                ProcessItemActivity::class,
+                $item
+            );
+        }
+
+        // Wait for all activities to complete
+        $results = yield ActivityStub::all($promises);
+
+        return [
+            'total_processed' => count($results),
+            'results' => $results,
+        ];
+    }
+}
+```
+
+### async()
+
+```php
+public static function async(callable $callback): PromiseInterface
+```
+
+Executes arbitrary code asynchronously by wrapping it in an `AsyncWorkflow`.
+
+<ParamField path="callback" type="callable" required>
+  A closure containing the code to execute asynchronously
+</ParamField>
+
+**Returns:** `PromiseInterface` that resolves to the callback's return value
+
+### Example
+
+```php
+use Workflow\Workflow;
+use Workflow\ActivityStub;
+
+class DataProcessingWorkflow extends Workflow
+{
+    public function execute(array $data)
+    {
+        // Execute async code without creating a dedicated activity class
+        $result = yield ActivityStub::async(function() use ($data) {
+            // This code runs asynchronously
+            $processed = array_map(function($item) {
+                return $item * 2;
+            }, $data);
+            
+            return $processed;
+        });
+
+        return $result;
+    }
+}
+```
+
+## Error Handling
+
+When activities fail and throw exceptions, those exceptions are automatically caught, serialized, and replayed in the workflow.
+
+### Example
+
+```php
+use Workflow\Workflow;
+use Workflow\ActivityStub;
+
+class PaymentWorkflow extends Workflow
+{
+    public function execute(Order $order)
+    {
+        try {
+            $result = yield ActivityStub::make(
+                ChargeCardActivity::class,
+                $order->amount
+            );
+            
+            return ['status' => 'success', 'result' => $result];
+        } catch (\PaymentException $e) {
+            // Activity failed after all retries
+            // Handle the error in the workflow
+            
+            yield ActivityStub::make(
+                RefundActivity::class,
+                $order->id
+            );
+            
+            return ['status' => 'failed', 'error' => $e->getMessage()];
+        }
+    }
+}
+```
+
+## Behavior and Characteristics
+
+### Deterministic Execution
+
+Activities maintain deterministic execution through the workflow's history log. During replay, activity calls use cached results from the execution log.
+
+```php
+public function execute()
+{
+    // First execution: activity runs
+    // Replay: result comes from log
+    $result = yield ActivityStub::make(MyActivity::class, $arg);
+    
+    // The result is always the same on replay
+    return $result;
+}
+```
+
+### Retry Behavior
+
+Activities automatically retry on failure according to their retry policy. The default retry strategy uses exponential backoff.
+
+```php
+use Workflow\Activity;
+
+class ProcessPaymentActivity extends Activity
+{
+    public $tries = 5; // Retry up to 5 times
+    
+    public function backoff()
+    {
+        return [1, 5, 15, 30, 60]; // Seconds between retries
+    }
+    
+    public function execute($amount)
+    {
+        // If this throws, it will retry automatically
+        return PaymentGateway::charge($amount);
+    }
+}
+```
+
+### Non-Retryable Exceptions
+
+Some exceptions should not trigger retries. Implement `NonRetryableExceptionContract` to mark them.
+
+```php
+use Workflow\Activity;
+use Workflow\Exceptions\NonRetryableException;
+
+class ValidateOrderActivity extends Activity
+{
+    public function execute(Order $order)
+    {
+        if ($order->amount <= 0) {
+            // Don't retry invalid data
+            throw new NonRetryableException('Invalid order amount');
+        }
+        
+        return ['valid' => true];
+    }
+}
+```
+
+### Testing with Fakes
+
+When workflows are faked using `WorkflowStub::fake()`, activities can be mocked.
+
+```php
+use Workflow\WorkflowStub;
+
+public function test_workflow_with_mocked_activity()
+{
+    WorkflowStub::fake([
+        ProcessPaymentActivity::class => ['status' => 'success', 'id' => '123'],
+    ]);
+
+    $workflow = WorkflowStub::make(OrderWorkflow::class);
+    $workflow->start($order);
+
+    // Activity returns mocked value
+    $this->assertTrue($workflow->completed());
+}
+```
+
+## Complete Example
+
+```php
+use Workflow\Workflow;
+use Workflow\ActivityStub;
+
+class UserOnboardingWorkflow extends Workflow
+{
+    public function execute(User $user)
+    {
+        // Send welcome email
+        yield ActivityStub::make(
+            SendEmailActivity::class,
+            $user->email,
+            'welcome',
+            ['name' => $user->name]
+        );
+
+        // Create user accounts in parallel
+        $accountCreations = [
+            ActivityStub::make(CreateStripeAccountActivity::class, $user),
+            ActivityStub::make(CreateMailchimpContactActivity::class, $user),
+            ActivityStub::make(CreateSlackAccountActivity::class, $user),
+        ];
+
+        try {
+            $accounts = yield ActivityStub::all($accountCreations);
+        } catch (\Exception $e) {
+            // One or more account creations failed
+            // Log error and continue
+            yield ActivityStub::make(
+                LogErrorActivity::class,
+                'account_creation_failed',
+                $e->getMessage()
+            );
+        }
+
+        // Execute custom async code
+        $stats = yield ActivityStub::async(function() use ($user) {
+            return [
+                'signup_date' => now(),
+                'user_count' => User::count(),
+            ];
+        });
+
+        // Send admin notification
+        yield ActivityStub::make(
+            SendEmailActivity::class,
+            'admin@example.com',
+            'new_user_registered',
+            ['user' => $user, 'stats' => $stats]
+        );
+
+        return [
+            'status' => 'completed',
+            'user_id' => $user->id,
+            'accounts' => $accounts ?? [],
+            'stats' => $stats,
+        ];
+    }
+}
+```
+
+## Key Differences from Child Workflows
+
+| Feature | Activity | Child Workflow |
+|---------|----------|----------------|
+| **Execution** | Single unit of work | Full workflow with state |
+| **Retries** | Configurable retry policy | Follows workflow retry logic |
+| **State** | No state management | Can have queries/signals |
+| **Nesting** | Cannot spawn workflows | Can spawn more children |
+| **Use Case** | Single operations (API calls, DB updates) | Complex multi-step processes |
+
+```php
+// Use Activity for simple operations
+$result = yield ActivityStub::make(SendEmailActivity::class, $email);
+
+// Use Child Workflow for complex processes
+$result = yield ChildWorkflowStub::make(
+    MultiStepOnboardingWorkflow::class,
+    $user
+);
+```
+
+## Best Practices
+
+### 1. Keep Activities Idempotent
+
+Activities should be safe to retry and produce the same result when called multiple times.
+
+```php
+class CreateUserActivity extends Activity
+{
+    public function execute(array $userData)
+    {
+        // Use firstOrCreate for idempotency
+        return User::firstOrCreate(
+            ['email' => $userData['email']],
+            $userData
+        );
+    }
+}
+```
+
+### 2. Use Timeouts for Long-Running Operations
+
+```php
+class LongRunningActivity extends Activity
+{
+    public $timeout = 300; // 5 minutes
+
+    public function execute()
+    {
+        // Send heartbeats for operations longer than timeout
+        foreach ($items as $item) {
+            $this->heartbeat();
+            $this->processItem($item);
+        }
+    }
+}
+```
+
+### 3. Handle Errors Gracefully
+
+```php
+public function execute(Order $order)
+{
+    try {
+        $result = yield ActivityStub::make(
+            ChargeCardActivity::class,
+            $order->amount
+        );
+    } catch (\PaymentException $e) {
+        // Compensating action
+        yield ActivityStub::make(
+            SendFailureNotificationActivity::class,
+            $order->customer->email
+        );
+        
+        throw $e; // Re-throw to fail workflow
+    }
+}
+```

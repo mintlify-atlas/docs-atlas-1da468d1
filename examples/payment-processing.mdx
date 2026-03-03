@@ -1,0 +1,402 @@
+---
+title: 'Payment Processing with Saga Pattern'
+description: 'Reliable payment processing with compensating transactions and rollback support'
+---
+
+This example demonstrates a payment processing workflow using the Saga pattern. It ensures data consistency across distributed services by implementing compensating transactions for rollback scenarios.
+
+## Overview
+
+The payment workflow coordinates multiple steps:
+- Reserve inventory
+- Process payment
+- Create order
+- Send confirmation
+
+If any step fails, compensating transactions automatically undo previous operations.
+
+## Workflow Implementation
+
+```php
+<?php
+
+namespace App\Workflows;
+
+use function Workflow\activity;
+use Workflow\Workflow;
+
+class PaymentProcessingWorkflow extends Workflow
+{
+    public function execute(
+        string $userId,
+        array $cartItems,
+        string $paymentMethod,
+        float $totalAmount
+    ) {
+        try {
+            // Step 1: Reserve inventory for cart items
+            $reservationId = yield activity(
+                ReserveInventoryActivity::class,
+                $cartItems
+            );
+            
+            // Add compensation: release inventory if later steps fail
+            $this->addCompensation(
+                static fn () => activity(
+                    ReleaseInventoryActivity::class,
+                    $reservationId
+                )
+            );
+
+            // Step 2: Process payment
+            $paymentId = yield activity(
+                ProcessPaymentActivity::class,
+                $userId,
+                $paymentMethod,
+                $totalAmount
+            );
+            
+            // Add compensation: refund payment if later steps fail
+            $this->addCompensation(
+                static fn () => activity(
+                    RefundPaymentActivity::class,
+                    $paymentId
+                )
+            );
+
+            // Step 3: Create order record
+            $orderId = yield activity(
+                CreateOrderActivity::class,
+                $userId,
+                $cartItems,
+                $paymentId,
+                $reservationId
+            );
+            
+            // Add compensation: cancel order if later steps fail
+            $this->addCompensation(
+                static fn () => activity(
+                    CancelOrderActivity::class,
+                    $orderId
+                )
+            );
+
+            // Step 4: Update inventory (convert reservation to actual stock reduction)
+            yield activity(
+                UpdateInventoryActivity::class,
+                $reservationId,
+                $cartItems
+            );
+
+            // Step 5: Send confirmation email
+            yield activity(
+                SendOrderConfirmationActivity::class,
+                $userId,
+                $orderId
+            );
+
+            return [
+                'status' => 'success',
+                'orderId' => $orderId,
+                'paymentId' => $paymentId,
+                'amount' => $totalAmount,
+            ];
+
+        } catch (\Throwable $e) {
+            // Execute compensating transactions in reverse order
+            yield from $this->compensate();
+            
+            // Re-throw to mark workflow as failed
+            throw $e;
+        }
+    }
+}
+```
+
+## Activity Implementations
+
+### Reserve Inventory Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Models\InventoryReservation;
+use App\Models\Product;
+use Workflow\Activity;
+
+class ReserveInventoryActivity extends Activity
+{
+    public function execute(array $cartItems): string
+    {
+        $reservation = InventoryReservation::create([
+            'status' => 'pending',
+            'expires_at' => now()->addMinutes(15),
+        ]);
+
+        foreach ($cartItems as $item) {
+            $product = Product::findOrFail($item['product_id']);
+            
+            if ($product->stock < $item['quantity']) {
+                throw new \Exception(
+                    "Insufficient stock for product: {$product->name}"
+                );
+            }
+
+            $reservation->items()->create([
+                'product_id' => $item['product_id'],
+                'quantity' => $item['quantity'],
+            ]);
+        }
+
+        return $reservation->id;
+    }
+}
+```
+
+### Process Payment Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Services\PaymentGateway;
+use Workflow\Activity;
+
+class ProcessPaymentActivity extends Activity
+{
+    public int $tries = 3;
+    
+    public function __construct(
+        private PaymentGateway $gateway
+    ) {}
+
+    public function execute(
+        string $userId,
+        string $paymentMethod,
+        float $amount
+    ): string {
+        // Process payment through payment gateway
+        $result = $this->gateway->charge([
+            'user_id' => $userId,
+            'amount' => $amount,
+            'currency' => 'USD',
+            'payment_method' => $paymentMethod,
+            'idempotency_key' => $this->workflowId(),
+        ]);
+
+        if (!$result->successful()) {
+            throw new \Exception(
+                "Payment failed: {$result->errorMessage()}"
+            );
+        }
+
+        return $result->transactionId();
+    }
+}
+```
+
+### Create Order Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Models\Order;
+use Workflow\Activity;
+
+class CreateOrderActivity extends Activity
+{
+    public function execute(
+        string $userId,
+        array $cartItems,
+        string $paymentId,
+        string $reservationId
+    ): string {
+        $order = Order::create([
+            'user_id' => $userId,
+            'payment_id' => $paymentId,
+            'reservation_id' => $reservationId,
+            'status' => 'confirmed',
+            'total' => collect($cartItems)
+                ->sum(fn($item) => $item['price'] * $item['quantity']),
+        ]);
+
+        foreach ($cartItems as $item) {
+            $order->items()->create([
+                'product_id' => $item['product_id'],
+                'quantity' => $item['quantity'],
+                'price' => $item['price'],
+            ]);
+        }
+
+        return $order->id;
+    }
+}
+```
+
+### Compensation Activities
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Models\InventoryReservation;
+use Workflow\Activity;
+
+class ReleaseInventoryActivity extends Activity
+{
+    public function execute(string $reservationId): void
+    {
+        $reservation = InventoryReservation::findOrFail($reservationId);
+        $reservation->update(['status' => 'released']);
+    }
+}
+```
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Services\PaymentGateway;
+use Workflow\Activity;
+
+class RefundPaymentActivity extends Activity
+{
+    public function __construct(
+        private PaymentGateway $gateway
+    ) {}
+
+    public function execute(string $paymentId): void
+    {
+        $this->gateway->refund($paymentId);
+    }
+}
+```
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Models\Order;
+use Workflow\Activity;
+
+class CancelOrderActivity extends Activity
+{
+    public function execute(string $orderId): void
+    {
+        Order::where('id', $orderId)
+            ->update(['status' => 'cancelled']);
+    }
+}
+```
+
+## Starting the Workflow
+
+```php
+use App\Workflows\PaymentProcessingWorkflow;
+use Workflow\WorkflowStub;
+
+$workflow = WorkflowStub::make(PaymentProcessingWorkflow::class);
+
+$workflow->start(
+    userId: auth()->id(),
+    cartItems: [
+        ['product_id' => 1, 'quantity' => 2, 'price' => 29.99],
+        ['product_id' => 5, 'quantity' => 1, 'price' => 149.99],
+    ],
+    paymentMethod: 'pm_1234567890',
+    totalAmount: 209.97
+);
+
+// Wait for completion
+while ($workflow->running()) {
+    sleep(1);
+}
+
+if ($workflow->completed()) {
+    $result = $workflow->output();
+    return response()->json([
+        'success' => true,
+        'order_id' => $result['orderId'],
+    ]);
+}
+```
+
+## Error Scenarios and Rollback
+
+### Scenario 1: Payment Failure
+
+```
+✓ Reserve inventory (Reservation ID: 123)
+✗ Process payment (Card declined)
+↩ Release inventory (Compensation)
+```
+
+### Scenario 2: Order Creation Failure
+
+```
+✓ Reserve inventory (Reservation ID: 123)
+✓ Process payment (Payment ID: pay_456)
+✗ Create order (Database error)
+↩ Refund payment (Compensation)
+↩ Release inventory (Compensation)
+```
+
+### Scenario 3: Success
+
+```
+✓ Reserve inventory
+✓ Process payment
+✓ Create order
+✓ Update inventory
+✓ Send confirmation
+→ No compensations needed
+```
+
+## Testing Compensations
+
+You can test the saga pattern by forcing failures:
+
+```php
+use Tests\TestCase;
+use Workflow\WorkflowStub;
+
+class PaymentWorkflowTest extends TestCase
+{
+    public function test_compensates_on_payment_failure()
+    {
+        // Mock payment gateway to fail
+        $this->mock(PaymentGateway::class)
+            ->shouldReceive('charge')
+            ->andReturn(new FailedPaymentResult());
+
+        $workflow = WorkflowStub::make(PaymentProcessingWorkflow::class);
+        $workflow->start(...);
+
+        while ($workflow->running());
+
+        // Verify workflow failed
+        $this->assertTrue($workflow->failed());
+        
+        // Verify inventory was released
+        $reservation = InventoryReservation::first();
+        $this->assertEquals('released', $reservation->status);
+    }
+}
+```
+
+## Key Features
+
+- **Automatic Rollback**: Compensating transactions execute automatically on failure
+- **Reverse Order**: Compensations run in reverse order of operations
+- **Idempotency**: Payment operations use workflow ID as idempotency key
+- **Durability**: State persists across failures and restarts
+- **Transaction Boundaries**: Each activity is a separate transaction
+- **Audit Trail**: Complete log of all operations and compensations

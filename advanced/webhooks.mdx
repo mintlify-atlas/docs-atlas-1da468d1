@@ -1,0 +1,536 @@
+---
+title: 'Webhooks'
+description: 'Trigger workflows and send signals via HTTP webhooks'
+icon: 'webhook'
+---
+
+## Overview
+
+Webhooks provide HTTP endpoints to interact with your workflows from external systems. You can:
+
+- Start new workflow instances
+- Send signals to running workflows
+- Integrate with third-party services (Stripe, GitHub, etc.)
+
+## Enabling Webhooks
+
+Add the `#[Webhook]` attribute to your workflow class to expose HTTP endpoints:
+
+```php
+use Workflow\Workflow;
+use Workflow\Webhook;
+use Workflow\SignalMethod;
+
+#[Webhook]
+class PaymentWorkflow extends Workflow
+{
+    public function execute($amount, $customerId)
+    {
+        // Wait for payment confirmation
+        yield $this->awaitSignal('confirm');
+        
+        yield $this->processPayment($amount, $customerId);
+    }
+
+    #[SignalMethod]
+    #[Webhook]
+    public function confirm($paymentId)
+    {
+        $this->confirmed = true;
+        $this->paymentId = $paymentId;
+    }
+}
+```
+
+## Registering Routes
+
+In your `routes/web.php` or service provider:
+
+```php
+use Workflow\Webhooks;
+
+Webhooks::routes();
+```
+
+This automatically discovers all workflows with the `#[Webhook]` attribute and registers routes.
+
+### Custom Configuration
+
+```php
+// Custom namespace and path
+Webhooks::routes(
+    customNamespace: 'App\\Workflows',
+    customAppPath: app_path('Workflows')
+);
+```
+
+## Generated Routes
+
+The webhook system generates two types of routes:
+
+### 1. Start Workflow Routes
+
+For workflows with `#[Webhook]` on the class:
+
+```
+POST /webhooks/start/{workflow-slug}
+```
+
+Example:
+```bash
+curl -X POST https://yourapp.com/webhooks/start/payment-workflow \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 100, "customerId": "cus_123"}'
+```
+
+### 2. Signal Routes
+
+For methods with `#[SignalMethod]` and `#[Webhook]`:
+
+```
+POST /webhooks/signal/{workflow-slug}/{workflowId}/{signal-name}
+```
+
+Example:
+```bash
+curl -X POST https://yourapp.com/webhooks/signal/payment-workflow/wf_abc123/confirm \
+  -H "Content-Type: application/json" \
+  -d '{"paymentId": "pi_123"}'
+```
+
+## Route Configuration
+
+Customize the base path in `config/workflows.php`:
+
+```php
+return [
+    'webhooks_route' => 'webhooks', // Default: /webhooks/*
+    
+    // Or use a custom path
+    'webhooks_route' => 'api/workflow-events',
+];
+```
+
+## Parameter Mapping
+
+Webhook requests automatically map JSON payload to method parameters:
+
+```php
+#[Webhook]
+class OrderWorkflow extends Workflow
+{
+    // Maps JSON: {"orderId": "123", "priority": "high"}
+    public function execute($orderId, $priority = 'normal')
+    {
+        yield $this->processOrder($orderId, $priority);
+    }
+}
+```
+
+From the source code at `src/Webhooks.php:137-153`, the system:
+1. Inspects method parameters using reflection
+2. Matches parameter names to JSON keys
+3. Uses default values when keys are missing
+4. Maintains parameter order
+
+## Authentication
+
+Secure your webhooks with built-in authentication methods.
+
+### None (Development Only)
+
+```php
+// config/workflows.php
+return [
+    'webhook_auth' => [
+        'method' => 'none', // ⚠️ Not recommended for production
+    ],
+];
+```
+
+### Token-Based Authentication
+
+```php
+// config/workflows.php
+return [
+    'webhook_auth' => [
+        'method' => 'token',
+        'token' => [
+            'header' => 'X-Workflow-Token',
+            'token' => env('WORKFLOW_WEBHOOK_TOKEN'),
+        ],
+    ],
+];
+```
+
+**Request:**
+```bash
+curl -X POST https://yourapp.com/webhooks/start/payment-workflow \
+  -H "X-Workflow-Token: your-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 100}'
+```
+
+### HMAC Signature Authentication
+
+For webhook providers like Stripe, GitHub, etc.:
+
+```php
+// config/workflows.php
+return [
+    'webhook_auth' => [
+        'method' => 'signature',
+        'signature' => [
+            'header' => 'X-Signature',
+            'secret' => env('WEBHOOK_SIGNING_SECRET'),
+        ],
+    ],
+];
+```
+
+**How it works** (from `src/Auth/SignatureAuthenticator.php:13-16`):
+1. Compute HMAC-SHA256 of request body using secret
+2. Compare with signature header using timing-safe comparison
+3. Reject request if signatures don't match
+
+**Request:**
+```bash
+# Server computes: hash_hmac('sha256', $request_body, $secret)
+curl -X POST https://yourapp.com/webhooks/start/payment-workflow \
+  -H "X-Signature: abc123..." \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 100}'
+```
+
+### Custom Authentication
+
+Implement your own authenticator:
+
+```php
+use Workflow\Auth\WebhookAuthenticator;
+use Illuminate\Http\Request;
+
+class ApiKeyAuthenticator implements WebhookAuthenticator
+{
+    public function validate(Request $request): Request
+    {
+        $apiKey = $request->header('X-API-Key');
+        
+        if (!$this->isValidApiKey($apiKey)) {
+            abort(401, 'Invalid API key');
+        }
+        
+        return $request;
+    }
+    
+    private function isValidApiKey($key): bool
+    {
+        return ApiKey::where('key', $key)
+            ->where('active', true)
+            ->exists();
+    }
+}
+```
+
+**Configuration:**
+```php
+// config/workflows.php
+return [
+    'webhook_auth' => [
+        'method' => 'custom',
+        'custom' => [
+            'class' => App\Auth\ApiKeyAuthenticator::class,
+        ],
+    ],
+];
+```
+
+## Security Considerations
+
+<Warning>
+  **Never use `method: 'none'` in production.** Always authenticate webhook requests to prevent unauthorized workflow execution.
+</Warning>
+
+### Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use HTTPS Only">
+    Always use HTTPS in production to prevent man-in-the-middle attacks:
+    ```php
+    // In middleware or service provider
+    if (!$request->secure() && app()->environment('production')) {
+        abort(403, 'HTTPS required');
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Rotate Secrets Regularly">
+    ```bash
+    # Generate new secret
+    php artisan tinker
+    >>> Str::random(64)
+    
+    # Update .env
+    WORKFLOW_WEBHOOK_TOKEN=new-secret-here
+    ```
+  </Accordion>
+
+  <Accordion title="Rate Limiting">
+    Apply rate limiting to webhook endpoints:
+    ```php
+    Route::middleware(['throttle:60,1'])->group(function () {
+        Webhooks::routes();
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Validate Payload">
+    Always validate webhook payloads:
+    ```php
+    public function execute($orderId)
+    {
+        $validated = validator(
+            ['orderId' => $orderId],
+            ['orderId' => 'required|string|exists:orders,id']
+        )->validate();
+        
+        yield $this->processOrder($validated['orderId']);
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="IP Allowlisting">
+    Restrict webhooks to known IP addresses:
+    ```php
+    // In custom authenticator
+    $allowedIps = ['192.168.1.1', '10.0.0.1'];
+    if (!in_array($request->ip(), $allowedIps)) {
+        abort(403, 'IP not allowed');
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Integration Examples
+
+### Stripe Webhooks
+
+```php
+use Workflow\Workflow;
+use Workflow\Webhook;
+use Workflow\SignalMethod;
+
+#[Webhook]
+class StripePaymentWorkflow extends Workflow
+{
+    public function execute($amount, $customerId)
+    {
+        // Create payment intent
+        $intent = yield $this->createPaymentIntent($amount, $customerId);
+        
+        // Wait for webhook confirmation
+        yield $this->awaitSignal('payment-succeeded');
+        
+        // Fulfill order
+        yield $this->fulfillOrder();
+    }
+
+    #[SignalMethod]
+    #[Webhook]
+    public function paymentSucceeded($paymentIntentId)
+    {
+        $this->status = 'paid';
+        $this->paymentIntentId = $paymentIntentId;
+    }
+}
+```
+
+**Stripe Configuration:**
+```
+Endpoint URL: https://yourapp.com/webhooks/signal/stripe-payment-workflow/{workflowId}/payment-succeeded
+Events: payment_intent.succeeded
+```
+
+### GitHub Webhooks
+
+```php
+#[Webhook]
+class DeploymentWorkflow extends Workflow
+{
+    public function execute($repository, $branch)
+    {
+        yield $this->awaitSignal('push');
+        yield $this->runTests();
+        yield $this->deploy();
+    }
+
+    #[SignalMethod]
+    #[Webhook]
+    public function push($commit, $author)
+    {
+        $this->latestCommit = $commit;
+        $this->author = $author;
+    }
+}
+```
+
+### Custom API Integration
+
+```php
+#[Webhook]
+class OrderWorkflow extends Workflow
+{
+    public function execute($orderId)
+    {
+        yield $this->createOrder($orderId);
+        yield $this->awaitSignal('shipping-updated');
+        yield $this->notifyCustomer();
+    }
+
+    #[SignalMethod]
+    #[Webhook]
+    public function shippingUpdated($trackingNumber, $carrier)
+    {
+        $this->trackingNumber = $trackingNumber;
+        $this->carrier = $carrier;
+    }
+}
+```
+
+## Getting Webhook URLs
+
+In activities, get webhook URLs programmatically:
+
+```php
+use Workflow\Activity;
+
+class SendEmailActivity extends Activity
+{
+    public function execute($workflowId, $email)
+    {
+        $confirmUrl = $this->webhookUrl('confirm');
+        $cancelUrl = $this->webhookUrl('cancel');
+        
+        Mail::to($email)->send(new ConfirmationEmail([
+            'confirm_url' => $confirmUrl,
+            'cancel_url' => $cancelUrl,
+        ]));
+    }
+}
+```
+
+From `src/Activity.php:92-104`, the `webhookUrl()` method generates the correct URL based on:
+- Workflow class name (converted to kebab-case)
+- Workflow ID (for signal methods)
+- Signal method name
+
+## Response Format
+
+All webhook endpoints return JSON:
+
+**Start Workflow:**
+```json
+{
+  "message": "Workflow started"
+}
+```
+
+**Send Signal:**
+```json
+{
+  "message": "Signal sent"
+}
+```
+
+## Error Responses
+
+**401 Unauthorized:**
+```json
+{
+  "message": "Unauthorized"
+}
+```
+
+**404 Not Found:**
+```json
+{
+  "message": "Not Found"
+}
+```
+
+**500 Server Error:**
+```json
+{
+  "message": "Server Error",
+  "exception": "..."
+}
+```
+
+## Testing Webhooks
+
+```php
+use Illuminate\Foundation\Testing\RefreshDatabase;
+
+class WebhookTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_start_workflow_webhook()
+    {
+        $response = $this->postJson('/webhooks/start/payment-workflow', [
+            'amount' => 100,
+            'customerId' => 'cus_123',
+        ], [
+            'X-Workflow-Token' => config('workflows.webhook_auth.token.token'),
+        ]);
+
+        $response->assertStatus(200)
+            ->assertJson(['message' => 'Workflow started']);
+
+        $this->assertDatabaseHas('stored_workflows', [
+            'class' => PaymentWorkflow::class,
+        ]);
+    }
+
+    public function test_signal_webhook()
+    {
+        $workflow = WorkflowStub::make(PaymentWorkflow::class)
+            ->start(100, 'cus_123');
+
+        $response = $this->postJson(
+            "/webhooks/signal/payment-workflow/{$workflow->id()}/confirm",
+            ['paymentId' => 'pi_123'],
+            ['X-Workflow-Token' => config('workflows.webhook_auth.token.token')]
+        );
+
+        $response->assertStatus(200)
+            ->assertJson(['message' => 'Signal sent']);
+    }
+
+    public function test_unauthorized_request()
+    {
+        $response = $this->postJson('/webhooks/start/payment-workflow', [
+            'amount' => 100,
+        ]);
+
+        $response->assertStatus(401);
+    }
+}
+```
+
+## Route Discovery
+
+The webhook system (from `src/Webhooks.php:26-116`) automatically:
+
+1. Scans the workflows directory
+2. Finds classes extending `Workflow` with `#[Webhook]` attribute
+3. Registers POST routes for the `execute` method
+4. Finds methods with `#[SignalMethod]` and `#[Webhook]` attributes
+5. Registers POST routes for each signal method
+6. Converts class/method names to kebab-case for URLs
+
+## Related Topics
+
+- [Authentication](/advanced/authentication) - Webhook authentication details
+- [Signals](/patterns/signals) - Using signals in workflows
+- [Activities](/concepts/activities) - Getting webhook URLs in activities

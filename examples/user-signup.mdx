@@ -1,0 +1,286 @@
+---
+title: 'User Signup Flow'
+description: 'Multi-step user onboarding with email verification and welcome notifications'
+---
+
+This example demonstrates a complete user signup workflow with email verification, profile setup, and welcome notifications. It showcases signal methods for handling user actions and error handling with retries.
+
+## Overview
+
+The user signup workflow coordinates multiple activities:
+- Creating the user account
+- Sending verification email
+- Waiting for email verification (with timeout)
+- Setting up user profile
+- Sending welcome notification
+
+## Workflow Implementation
+
+```php
+<?php
+
+namespace App\Workflows;
+
+use function Workflow\{activity, await, awaitWithTimeout};
+use Workflow\SignalMethod;
+use Workflow\Workflow;
+
+class UserSignupWorkflow extends Workflow
+{
+    private bool $emailVerified = false;
+    private ?string $userId = null;
+
+    #[SignalMethod]
+    public function verifyEmail(string $token): void
+    {
+        // Signal received when user clicks verification link
+        $this->emailVerified = true;
+    }
+
+    #[SignalMethod]
+    public function cancelSignup(): void
+    {
+        // Allow cancellation during signup process
+        throw new \Exception('Signup cancelled by user');
+    }
+
+    public function execute(string $email, string $name, string $password)
+    {
+        // Step 1: Create user account
+        $this->userId = yield activity(CreateUserActivity::class, $email, $name, $password);
+
+        // Step 2: Send verification email
+        yield activity(SendVerificationEmailActivity::class, $this->userId, $email);
+
+        // Step 3: Wait for email verification (24 hour timeout)
+        try {
+            yield awaitWithTimeout(
+                '24 hours',
+                fn() => $this->emailVerified
+            );
+        } catch (\Workflow\Exceptions\TimeoutException $e) {
+            // Mark account as unverified and send reminder
+            yield activity(SendVerificationReminderActivity::class, $this->userId);
+            throw new \Exception('Email verification timeout');
+        }
+
+        // Step 4: Activate user account
+        yield activity(ActivateUserAccountActivity::class, $this->userId);
+
+        // Step 5: Set up user profile with defaults
+        yield activity(CreateUserProfileActivity::class, $this->userId);
+
+        // Step 6: Send welcome email
+        yield activity(SendWelcomeEmailActivity::class, $this->userId, $email);
+
+        return [
+            'userId' => $this->userId,
+            'status' => 'completed',
+            'verifiedAt' => now()->toIso8601String(),
+        ];
+    }
+}
+```
+
+## Activity Implementations
+
+### Create User Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Models\User;
+use Illuminate\Support\Facades\Hash;
+use Workflow\Activity;
+
+class CreateUserActivity extends Activity
+{
+    public function execute(string $email, string $name, string $password): string
+    {
+        $user = User::create([
+            'email' => $email,
+            'name' => $name,
+            'password' => Hash::make($password),
+            'email_verified_at' => null,
+            'status' => 'pending',
+        ]);
+
+        return $user->id;
+    }
+}
+```
+
+### Send Verification Email Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Mail\VerificationEmail;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
+use Workflow\Activity;
+
+class SendVerificationEmailActivity extends Activity
+{
+    public function execute(string $userId, string $email): void
+    {
+        $token = Str::random(64);
+        
+        // Store token in cache for verification
+        cache()->put("verify:{$userId}", $token, now()->addHours(24));
+
+        Mail::to($email)->send(new VerificationEmail($userId, $token));
+    }
+}
+```
+
+### Activate User Account Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Models\User;
+use Workflow\Activity;
+
+class ActivateUserAccountActivity extends Activity
+{
+    public function execute(string $userId): void
+    {
+        User::where('id', $userId)->update([
+            'email_verified_at' => now(),
+            'status' => 'active',
+        ]);
+    }
+}
+```
+
+### Create User Profile Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Models\UserProfile;
+use Workflow\Activity;
+
+class CreateUserProfileActivity extends Activity
+{
+    public function execute(string $userId): void
+    {
+        UserProfile::create([
+            'user_id' => $userId,
+            'preferences' => [
+                'notifications' => true,
+                'newsletter' => true,
+            ],
+        ]);
+    }
+}
+```
+
+### Send Welcome Email Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Mail\WelcomeEmail;
+use Illuminate\Support\Facades\Mail;
+use Workflow\Activity;
+
+class SendWelcomeEmailActivity extends Activity
+{
+    public function execute(string $userId, string $email): void
+    {
+        Mail::to($email)->send(new WelcomeEmail($userId));
+    }
+}
+```
+
+## Starting the Workflow
+
+```php
+use App\Workflows\UserSignupWorkflow;
+use Workflow\WorkflowStub;
+
+// Start the signup workflow
+$workflow = WorkflowStub::make(UserSignupWorkflow::class);
+$workflow->start(
+    email: 'user@example.com',
+    name: 'John Doe',
+    password: 'secure-password'
+);
+
+// Get workflow ID to track progress
+$workflowId = $workflow->id();
+```
+
+## Handling Email Verification
+
+When the user clicks the verification link in their email:
+
+```php
+use Workflow\WorkflowStub;
+
+// In your email verification controller
+public function verify(Request $request, string $userId, string $token)
+{
+    // Validate token
+    $cachedToken = cache()->get("verify:{$userId}");
+    
+    if ($cachedToken !== $token) {
+        abort(403, 'Invalid verification token');
+    }
+
+    // Send signal to workflow
+    $workflow = WorkflowStub::load($workflowId);
+    $workflow->verifyEmail($token);
+
+    return redirect()->route('dashboard')
+        ->with('success', 'Email verified successfully!');
+}
+```
+
+## Monitoring Progress
+
+```php
+// Check workflow status
+$workflow = WorkflowStub::load($workflowId);
+
+if ($workflow->running()) {
+    // Workflow is still processing
+    $status = 'pending';
+} elseif ($workflow->completed()) {
+    // Signup completed successfully
+    $result = $workflow->output();
+    $userId = $result['userId'];
+} elseif ($workflow->failed()) {
+    // Handle failure (timeout, cancellation, etc.)
+    $status = 'failed';
+}
+```
+
+## Error Handling
+
+The workflow handles various error scenarios:
+
+- **Verification Timeout**: If the user doesn't verify within 24 hours, a reminder is sent
+- **User Cancellation**: Users can cancel signup via the `cancelSignup` signal
+- **Activity Failures**: Activities automatically retry with exponential backoff
+- **Duplicate Emails**: The `CreateUserActivity` should handle unique constraint violations
+
+## Key Features
+
+- **Durable State**: Workflow state persists across process restarts
+- **Signal Methods**: Handle external events like email verification
+- **Timeouts**: Automatic timeout handling for time-sensitive operations
+- **Retry Logic**: Built-in retry mechanism for transient failures
+- **Event Tracking**: All steps are logged for audit and debugging

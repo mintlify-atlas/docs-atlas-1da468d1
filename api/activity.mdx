@@ -1,0 +1,352 @@
+---
+title: Activity
+description: Base class for defining durable activities in Durable Workflow
+---
+
+## Overview
+
+The `Activity` class is the base class for all durable activities. Activities represent individual units of work that can fail and retry independently within a workflow.
+
+## Traits Used
+
+- `Dispatchable` - Enables dispatching activities to queues
+- `InteractsWithQueue` - Provides queue interaction methods
+- `Queueable` - Makes activities queueable
+- `RouteDependencyResolverTrait` - Resolves method dependencies
+- `SerializesModels` - Handles model serialization
+
+## Properties
+
+<ParamField path="tries" type="int" default="PHP_INT_MAX">
+  Number of times the activity should be attempted (defaults to unlimited)
+</ParamField>
+
+<ParamField path="maxExceptions" type="int" default="PHP_INT_MAX">
+  Maximum number of exceptions allowed before failing (defaults to unlimited)
+</ParamField>
+
+<ParamField path="timeout" type="int" default="0">
+  Maximum execution time in seconds (0 means no timeout)
+</ParamField>
+
+<ParamField path="key" type="string" default="''">
+  Unique key for the activity instance
+</ParamField>
+
+## Constructor
+
+```php
+public function __construct(
+    public int $index,
+    public string $now,
+    public StoredWorkflow $storedWorkflow,
+    ...$arguments
+)
+```
+
+Creates a new activity instance with workflow context and execution arguments.
+
+<ParamField path="index" type="int" required>
+  The index position of this activity in the workflow execution history
+</ParamField>
+
+<ParamField path="now" type="string" required>
+  The timestamp when the activity was scheduled
+</ParamField>
+
+<ParamField path="storedWorkflow" type="StoredWorkflow" required>
+  The parent workflow's persisted state
+</ParamField>
+
+<ParamField path="arguments" type="mixed" required>
+  Variable arguments passed to the activity execute method
+</ParamField>
+
+### Example
+
+```php
+use Workflow\Activity;
+
+class ProcessPaymentActivity extends Activity
+{
+    public function execute(float $amount, string $currency = 'USD')
+    {
+        // Activity logic here
+    }
+}
+
+// Constructor is called internally by the framework
+$activity = new ProcessPaymentActivity($index, $now, $storedWorkflow, 100.00, 'USD');
+```
+
+## Methods
+
+### backoff()
+
+```php
+public function backoff()
+```
+
+Defines the backoff strategy for retrying failed activities.
+
+**Returns:** Array of seconds to wait between retry attempts: `[1, 2, 5, 10, 15, 30, 60, 120]`
+
+### Example
+
+```php
+public function backoff()
+{
+    return [5, 10, 30, 60]; // Custom backoff strategy
+}
+```
+
+### uniqueId()
+
+```php
+public function uniqueId()
+```
+
+Returns a unique identifier for this activity instance, combining workflow ID and index.
+
+**Returns:** String in format `"{workflow_id}:{index}"`
+
+### Example
+
+```php
+$id = $activity->uniqueId();
+// Returns: "01234567-89ab-cdef-0123-456789abcdef:5"
+```
+
+### workflowId()
+
+```php
+public function workflowId()
+```
+
+Returns the parent workflow's ID.
+
+**Returns:** The stored workflow ID
+
+### Example
+
+```php
+$workflowId = $activity->workflowId();
+// Returns: "01234567-89ab-cdef-0123-456789abcdef"
+```
+
+### webhookUrl()
+
+```php
+public function webhookUrl(string $signalMethod = ''): string
+```
+
+Generates a webhook URL for starting workflows or sending signals.
+
+<ParamField path="signalMethod" type="string" default="''">
+  Optional signal method name. If empty, returns workflow start URL
+</ParamField>
+
+**Returns:** Absolute URL for the webhook endpoint
+
+### Example
+
+```php
+use Workflow\Activity;
+
+class SendEmailActivity extends Activity
+{
+    public function execute(string $email)
+    {
+        // Get workflow start URL
+        $startUrl = $this->webhookUrl();
+        
+        // Get signal URL
+        $signalUrl = $this->webhookUrl('confirmEmail');
+        
+        // Send email with URLs
+        Mail::send('email.confirmation', [
+            'confirmUrl' => $signalUrl,
+        ], function($message) use ($email) {
+            $message->to($email);
+        });
+    }
+}
+```
+
+### handle()
+
+```php
+public function handle()
+```
+
+Main activity execution handler. Calls the `execute()` method and handles exceptions.
+
+**Returns:** The result of the `execute()` method
+
+**Note:** This method is called internally by the framework. You should define the `execute()` method instead.
+
+### Example
+
+```php
+// Framework calls handle() internally
+// You define the execute() method:
+
+class ProcessPaymentActivity extends Activity
+{
+    public function execute(float $amount)
+    {
+        // Your activity logic
+        return PaymentGateway::charge($amount);
+    }
+}
+```
+
+### middleware()
+
+```php
+public function middleware()
+```
+
+Defines queue middleware for the activity. By default, applies `WithoutOverlappingMiddleware` and `ActivityMiddleware`.
+
+**Returns:** Array of middleware instances
+
+### Example
+
+```php
+public function middleware()
+{
+    return [
+        new RateLimited('activities'),
+        new WithoutOverlapping($this->uniqueId()),
+    ];
+}
+```
+
+### failed()
+
+```php
+public function failed(Throwable $throwable): void
+```
+
+Called when the activity permanently fails after all retries. Dispatches an exception event.
+
+<ParamField path="throwable" type="Throwable" required>
+  The exception that caused the failure
+</ParamField>
+
+### Example
+
+```php
+public function failed(Throwable $throwable): void
+{
+    parent::failed($throwable);
+    
+    // Custom failure handling
+    Log::error('Activity failed', [
+        'activity' => static::class,
+        'workflow_id' => $this->workflowId(),
+        'error' => $throwable->getMessage(),
+    ]);
+}
+```
+
+### heartbeat()
+
+```php
+public function heartbeat(): void
+```
+
+Sends a heartbeat signal for long-running activities. Updates timeout tracking and sets process alarm.
+
+### Example
+
+```php
+use Workflow\Activity;
+
+class LongRunningActivity extends Activity
+{
+    public $timeout = 300; // 5 minutes
+
+    public function execute(array $items)
+    {
+        foreach ($items as $item) {
+            $this->heartbeat(); // Reset timeout
+            
+            // Process item (takes time)
+            $this->processItem($item);
+        }
+    }
+
+    private function processItem($item)
+    {
+        // Long-running operation
+    }
+}
+```
+
+## Complete Example
+
+```php
+use Workflow\Activity;
+use Illuminate\Support\Facades\Http;
+use Workflow\Exceptions\NonRetryableException;
+
+class ProcessPaymentActivity extends Activity
+{
+    public $tries = 5;
+    public $timeout = 30;
+
+    public function backoff()
+    {
+        return [1, 5, 15, 30, 60];
+    }
+
+    public function execute(float $amount, string $paymentMethod)
+    {
+        try {
+            $response = Http::timeout($this->timeout)
+                ->post('https://api.payment-gateway.com/charge', [
+                    'amount' => $amount,
+                    'method' => $paymentMethod,
+                ]);
+
+            if ($response->failed()) {
+                // Invalid payment method - don't retry
+                if ($response->status() === 400) {
+                    throw new NonRetryableException(
+                        'Invalid payment method'
+                    );
+                }
+                
+                // Temporary error - will retry
+                throw new \Exception('Payment gateway error');
+            }
+
+            return $response->json();
+        } catch (\Throwable $e) {
+            if ($e instanceof NonRetryableException) {
+                throw $e;
+            }
+            
+            // Log and rethrow for retry
+            \Log::warning('Payment attempt failed', [
+                'attempt' => $this->attempts(),
+                'error' => $e->getMessage(),
+            ]);
+            
+            throw $e;
+        }
+    }
+
+    public function failed(Throwable $throwable): void
+    {
+        parent::failed($throwable);
+        
+        // Notify admin of payment failure
+        \Mail::to('admin@example.com')->send(
+            new PaymentFailedNotification($throwable)
+        );
+    }
+}
+```

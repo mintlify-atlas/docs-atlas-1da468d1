@@ -1,0 +1,318 @@
+---
+title: StoredWorkflowException
+description: Model for tracking exceptions and errors during workflow execution
+---
+
+The `StoredWorkflowException` model records exceptions that occur during workflow execution. Each entry represents a caught exception with its details preserved for debugging and monitoring.
+
+## Database Table
+
+**Table:** `workflow_exceptions`
+
+## Model Attributes
+
+<ResponseField name="id" type="integer" required>
+  Primary key for the exception record
+</ResponseField>
+
+<ResponseField name="stored_workflow_id" type="integer" required>
+  Foreign key reference to the parent workflow in the `workflows` table
+</ResponseField>
+
+<ResponseField name="class" type="string" required>
+  Fully qualified class name of the activity or workflow that threw the exception
+</ResponseField>
+
+<ResponseField name="exception" type="string" required>
+  Serialized exception data including message, stack trace, and exception type
+</ResponseField>
+
+<ResponseField name="created_at" type="timestamp" required>
+  Real-world timestamp when this exception was recorded (microsecond precision)
+</ResponseField>
+
+## Special Behavior
+
+### No updated_at Timestamp
+
+This model does not use the `updated_at` timestamp:
+
+```php
+public const UPDATED_AT = null;
+```
+
+Exception records are immutable once created and are never updated.
+
+## Relationships
+
+### workflow()
+
+While not explicitly defined in the model, you can access the parent workflow via:
+
+```php
+$exception = StoredWorkflowException::find($id);
+$workflow = $exception->workflow; // Implicit belongsTo relationship
+```
+
+This is an implicit `BelongsTo` relationship to [StoredWorkflow](/api/models/stored-workflow).
+
+## Querying Workflow Exceptions
+
+### Get all exceptions for a workflow
+
+```php
+use Workflow\Models\StoredWorkflow;
+
+$workflow = StoredWorkflow::find($workflowId);
+$exceptions = $workflow->exceptions; // Ordered by ID
+
+foreach ($exceptions as $exception) {
+    echo "Exception in {$exception->class}:\n";
+    echo "  {$exception->exception}\n";
+    echo "  Occurred at: {$exception->created_at}\n\n";
+}
+```
+
+### Check if a workflow has exceptions
+
+```php
+$workflow = StoredWorkflow::with('exceptions')->find($workflowId);
+
+if ($workflow->exceptions->isNotEmpty()) {
+    echo "Workflow encountered {$workflow->exceptions->count()} exception(s)\n";
+    
+    $latestException = $workflow->exceptions->last();
+    echo "Latest: {$latestException->exception}\n";
+}
+```
+
+### Find workflows with exceptions
+
+```php
+use Workflow\Models\StoredWorkflow;
+
+$failedWorkflows = StoredWorkflow::has('exceptions')
+    ->with('exceptions')
+    ->where('status', 'failed')
+    ->get();
+
+foreach ($failedWorkflows as $workflow) {
+    echo "Workflow {$workflow->id} failed with {$workflow->exceptions->count()} exception(s)\n";
+}
+```
+
+### Get exceptions by activity class
+
+```php
+use Workflow\Models\StoredWorkflowException;
+
+$emailExceptions = StoredWorkflowException::where('class', 'App\\Activities\\SendEmail')
+    ->orderBy('created_at', 'desc')
+    ->get();
+
+foreach ($emailExceptions as $exception) {
+    echo "SendEmail failed in workflow {$exception->stored_workflow_id}:\n";
+    echo "  {$exception->exception}\n";
+}
+```
+
+### Get recent exceptions across all workflows
+
+```php
+$recentExceptions = StoredWorkflowException::orderBy('created_at', 'desc')
+    ->limit(50)
+    ->with('workflow')
+    ->get();
+
+foreach ($recentExceptions as $exception) {
+    echo "[{$exception->created_at}] {$exception->class}:\n";
+    echo "  Workflow: {$exception->workflow->class}\n";
+    echo "  Error: {$exception->exception}\n\n";
+}
+```
+
+### Count exceptions by activity class
+
+```php
+use Illuminate\Support\Facades\DB;
+
+$exceptionStats = StoredWorkflowException::select('class', DB::raw('count(*) as total'))
+    ->groupBy('class')
+    ->orderBy('total', 'desc')
+    ->get();
+
+echo "Most common exception sources:\n";
+foreach ($exceptionStats as $stat) {
+    echo "  {$stat->class}: {$stat->total} exceptions\n";
+}
+```
+
+### Find workflows that failed on specific activity
+
+```php
+$workflows = StoredWorkflow::whereHas('exceptions', function ($query) {
+    $query->where('class', 'App\\Activities\\ProcessPayment');
+})->with('exceptions')->get();
+
+foreach ($workflows as $workflow) {
+    echo "Workflow {$workflow->id} failed during payment processing\n";
+}
+```
+
+## Understanding Exception Data
+
+The `exception` field contains serialized exception information:
+
+```php
+use Workflow\Models\StoredWorkflowException;
+
+$exception = StoredWorkflowException::find($id);
+
+// The exception field typically contains:
+// - Exception class name
+// - Exception message
+// - Stack trace
+// - File and line number
+// - Previous exceptions (if chained)
+
+echo "Raw exception data:\n";
+echo $exception->exception . "\n";
+
+// Depending on serialization format, you may need to unserialize:
+// $exceptionData = unserialize($exception->exception);
+```
+
+## Monitoring and Alerting
+
+Use exceptions for monitoring workflow health:
+
+```php
+use Workflow\Models\StoredWorkflowException;
+
+// Get exceptions in the last hour
+$recentExceptions = StoredWorkflowException::where('created_at', '>', now()->subHour())
+    ->count();
+
+if ($recentExceptions > 10) {
+    // Alert: High exception rate
+    logger()->warning("High workflow exception rate: {$recentExceptions} in last hour");
+}
+```
+
+## Debugging Failed Workflows
+
+Combine exceptions with logs to debug workflow failures:
+
+```php
+$workflow = StoredWorkflow::with(['logs', 'exceptions'])->find($workflowId);
+
+echo "Workflow execution timeline:\n";
+
+// Show all activity executions
+foreach ($workflow->logs as $log) {
+    echo "  [{$log->index}] {$log->class} - SUCCESS\n";
+}
+
+// Show exceptions
+if ($workflow->exceptions->isNotEmpty()) {
+    echo "\nExceptions encountered:\n";
+    foreach ($workflow->exceptions as $exception) {
+        echo "  {$exception->class} - FAILED\n";
+        echo "    {$exception->exception}\n";
+    }
+}
+```
+
+## Exception Retention
+
+Exceptions are automatically deleted when their parent workflow is pruned:
+
+```php
+// In StoredWorkflow model:
+protected function pruning(): void
+{
+    // ...
+    $workflow->exceptions()->delete();
+    // ...
+}
+```
+
+Configure pruning in `config/workflows.php`:
+
+```php
+'prune_age' => '1 month', // Keep exceptions for 1 month after workflow completion
+```
+
+## Common Exception Patterns
+
+### Activity Timeout
+
+```php
+$timeoutExceptions = StoredWorkflowException::where('exception', 'like', '%timeout%')
+    ->get();
+```
+
+### Connection Errors
+
+```php
+$connectionErrors = StoredWorkflowException::where('exception', 'like', '%ConnectionException%')
+    ->orWhere('exception', 'like', '%SQLSTATE%')
+    ->get();
+```
+
+### Serialization Issues
+
+```php
+$serializationErrors = StoredWorkflowException::where('exception', 'like', '%serialization%')
+    ->orWhere('exception', 'like', '%Serializable%')
+    ->get();
+```
+
+## Configuration
+
+The model class can be customized in `config/workflows.php`:
+
+```php
+'stored_workflow_exception_model' => Workflow\Models\StoredWorkflowException::class,
+```
+
+## Usage in Error Handling
+
+Exceptions are automatically recorded by the workflow engine:
+
+```php
+// In your workflow class
+public function execute($input)
+{
+    try {
+        $result = yield Workflow::newActivity(RiskyActivity::class, $input);
+    } catch (\Exception $e) {
+        // Exception is automatically stored in workflow_exceptions table
+        // with:
+        // - stored_workflow_id: this workflow's ID
+        // - class: 'App\Activities\RiskyActivity'
+        // - exception: serialized exception details
+        // - created_at: current timestamp
+        
+        // Handle the exception
+        yield Workflow::newActivity(LogErrorActivity::class, $e->getMessage());
+        throw $e;
+    }
+    
+    return $result;
+}
+```
+
+## Best Practices
+
+1. **Monitor regularly**: Set up alerts for exception rate increases
+2. **Analyze patterns**: Group exceptions by class to identify problematic activities
+3. **Preserve context**: Exceptions include stack traces for debugging
+4. **Don't rely solely on exceptions**: Also check workflow status and logs
+5. **Clean up old data**: Configure appropriate pruning age for your use case
+
+## See Also
+
+- [StoredWorkflow](/api/models/stored-workflow) - Parent workflow model
+- [StoredWorkflowLog](/api/models/stored-workflow-log) - Activity execution logs
+- [Error Handling](/advanced/error-handling) - Handling exceptions in workflows

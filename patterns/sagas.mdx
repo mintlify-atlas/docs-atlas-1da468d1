@@ -1,0 +1,360 @@
+---
+title: Sagas
+description: Implement compensating transactions to maintain consistency across distributed operations
+---
+
+The Saga pattern provides a way to maintain data consistency across multiple activities by defining compensating transactions that can undo work when failures occur.
+
+## Overview
+
+Sagas handle failures in distributed transactions by executing a series of local transactions, each with a corresponding compensation action. If any step fails, compensation actions run in reverse order to undo the completed work.
+
+## Basic Usage
+
+Use the `Sagas` trait and register compensation actions with `addCompensation()`:
+
+```php
+use Workflow\Workflow;
+use Workflow\Traits\Sagas;
+use function Workflow\activity;
+
+class BookingWorkflow extends Workflow
+{
+    use Sagas;
+    
+    public function execute($bookingId)
+    {
+        try {
+            // Reserve hotel
+            yield activity(ReserveHotelActivity::class, $bookingId);
+            $this->addCompensation(fn () => activity(CancelHotelActivity::class, $bookingId));
+            
+            // Book flight
+            yield activity(BookFlightActivity::class, $bookingId);
+            $this->addCompensation(fn () => activity(CancelFlightActivity::class, $bookingId));
+            
+            // Charge payment
+            yield activity(ChargePaymentActivity::class, $bookingId);
+            $this->addCompensation(fn () => activity(RefundPaymentActivity::class, $bookingId));
+            
+            return 'booking_completed';
+        } catch (\Throwable $e) {
+            // Run compensations in reverse order
+            yield from $this->compensate();
+            throw $e;
+        }
+    }
+}
+```
+
+<Note>
+Compensations are executed in reverse order - last added runs first. This ensures proper rollback sequence.
+</Note>
+
+## How It Works
+
+<Steps>
+  <Step title="Execute activity">
+    Perform a local transaction (e.g., reserve hotel)
+  </Step>
+  <Step title="Register compensation">
+    Add a compensation action that can undo the work (e.g., cancel hotel)
+  </Step>
+  <Step title="Continue or compensate">
+    If all activities succeed, complete normally. If any fails, run compensations in reverse.
+  </Step>
+</Steps>
+
+## Compensation Order
+
+Compensations run in reverse order of registration:
+
+```php
+public function execute()
+{
+    try {
+        // Step 1
+        yield activity(CreateOrderActivity::class);
+        $this->addCompensation(fn () => activity(DeleteOrderActivity::class)); // Runs 3rd
+        
+        // Step 2
+        yield activity(ReserveInventoryActivity::class);
+        $this->addCompensation(fn () => activity(ReleaseInventoryActivity::class)); // Runs 2nd
+        
+        // Step 3
+        yield activity(ProcessPaymentActivity::class);
+        $this->addCompensation(fn () => activity(RefundPaymentActivity::class)); // Runs 1st
+        
+        return 'success';
+    } catch (\Throwable $e) {
+        yield from $this->compensate();
+        throw $e; // Or return 'compensated'
+    }
+}
+```
+
+## Parallel Compensation
+
+By default, compensations run sequentially in reverse order. Use `setParallelCompensation()` to run them in parallel:
+
+```php
+use Workflow\Traits\Sagas;
+
+class ParallelSagaWorkflow extends Workflow
+{
+    use Sagas;
+    
+    public function execute()
+    {
+        // Enable parallel compensation
+        $this->setParallelCompensation(true);
+        
+        try {
+            yield activity(ReserveHotelActivity::class);
+            $this->addCompensation(fn () => activity(CancelHotelActivity::class));
+            
+            yield activity(BookFlightActivity::class);
+            $this->addCompensation(fn () => activity(CancelFlightActivity::class));
+            
+            yield activity(RentCarActivity::class);
+            $this->addCompensation(fn () => activity(CancelCarActivity::class));
+            
+            return 'success';
+        } catch (\Throwable $e) {
+            // All compensations run in parallel
+            yield from $this->compensate();
+            throw $e;
+        }
+    }
+}
+```
+
+<Info>
+Parallel compensation is faster but should only be used when compensations are independent of each other.
+</Info>
+
+## Continue with Errors
+
+By default, if a compensation fails, the entire compensation process stops. Use `setContinueWithError()` to continue compensating even if some fail:
+
+```php
+public function execute()
+{
+    // Continue compensating even if some compensations fail
+    $this->setContinueWithError(true);
+    
+    try {
+        yield activity(Step1Activity::class);
+        $this->addCompensation(fn () => activity(UndoStep1Activity::class));
+        
+        yield activity(Step2Activity::class);
+        $this->addCompensation(fn () => activity(UndoStep2Activity::class));
+        
+        yield activity(Step3Activity::class);
+        $this->addCompensation(fn () => activity(UndoStep3Activity::class));
+        
+        return 'success';
+    } catch (\Throwable $e) {
+        yield from $this->compensate();
+        // Even if some compensations failed, we continue
+        return 'compensated_with_errors';
+    }
+}
+```
+
+<Warning>
+When using `setContinueWithError(true)`, ensure you have monitoring and alerting for partial compensation failures.
+</Warning>
+
+## Partial Compensation
+
+You can handle specific errors and decide whether to compensate:
+
+```php
+public function execute($orderId)
+{
+    try {
+        yield activity(ValidateOrderActivity::class, $orderId);
+        // No compensation needed for validation
+        
+        yield activity(ChargePaymentActivity::class, $orderId);
+        $this->addCompensation(fn () => activity(RefundPaymentActivity::class, $orderId));
+        
+        yield activity(UpdateInventoryActivity::class, $orderId);
+        $this->addCompensation(fn () => activity(RestoreInventoryActivity::class, $orderId));
+        
+        return 'completed';
+    } catch (ValidationException $e) {
+        // Don't compensate for validation errors
+        return 'validation_failed';
+    } catch (\Throwable $e) {
+        // Compensate for other errors
+        yield from $this->compensate();
+        throw $e;
+    }
+}
+```
+
+## Successful Completion Without Exception
+
+You don't need to compensate on success - compensations are only for failure scenarios:
+
+```php
+public function execute($orderId, $shouldFail = false)
+{
+    try {
+        yield activity(ReserveInventoryActivity::class, $orderId);
+        $this->addCompensation(fn () => activity(ReleaseInventoryActivity::class, $orderId));
+        
+        yield activity(ProcessPaymentActivity::class, $orderId);
+        $this->addCompensation(fn () => activity(RefundPaymentActivity::class, $orderId));
+        
+        if ($shouldFail) {
+            throw new \Exception('Simulated failure');
+        }
+        
+        // Success - compensations are registered but never executed
+        return 'success';
+    } catch (\Throwable $e) {
+        // Only compensate on failure
+        yield from $this->compensate();
+        throw $e;
+    }
+}
+```
+
+## Real-World Example
+
+E-commerce order processing with multiple payment providers:
+
+```php
+class OrderSagaWorkflow extends Workflow
+{
+    use Sagas;
+    
+    public function execute($orderId, $customerId, $amount)
+    {
+        $this->setParallelCompensation(false);
+        $this->setContinueWithError(false);
+        
+        try {
+            // Create order record
+            $order = yield activity(CreateOrderActivity::class, $orderId, $customerId, $amount);
+            $this->addCompensation(
+                fn () => activity(DeleteOrderActivity::class, $orderId)
+            );
+            
+            // Reserve inventory
+            yield activity(ReserveInventoryActivity::class, $order);
+            $this->addCompensation(
+                fn () => activity(ReleaseInventoryActivity::class, $order)
+            );
+            
+            // Authorize payment
+            $authCode = yield activity(AuthorizePaymentActivity::class, $customerId, $amount);
+            $this->addCompensation(
+                fn () => activity(VoidPaymentActivity::class, $authCode)
+            );
+            
+            // Capture payment
+            yield activity(CapturePaymentActivity::class, $authCode);
+            $this->addCompensation(
+                fn () => activity(RefundPaymentActivity::class, $authCode)
+            );
+            
+            // Update customer loyalty points
+            yield activity(AddLoyaltyPointsActivity::class, $customerId, $amount);
+            $this->addCompensation(
+                fn () => activity(RemoveLoyaltyPointsActivity::class, $customerId, $amount)
+            );
+            
+            // Send confirmation email
+            yield activity(SendConfirmationEmailActivity::class, $order);
+            // Note: No compensation for email - it's idempotent/informational
+            
+            return 'order_completed';
+        } catch (\Throwable $e) {
+            // Rollback all changes
+            yield from $this->compensate();
+            
+            // Optionally log the failure
+            yield activity(LogFailureActivity::class, $orderId, $e->getMessage());
+            
+            return 'order_failed';
+        }
+    }
+}
+```
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Distributed Transactions" icon="network-wired">
+    Maintain consistency across multiple services without 2PC
+  </Card>
+  <Card title="Booking Systems" icon="ticket">
+    Reserve multiple resources and rollback if any fails
+  </Card>
+  <Card title="Payment Processing" icon="credit-card">
+    Handle multi-step payment flows with refund capabilities
+  </Card>
+  <Card title="Order Fulfillment" icon="box">
+    Coordinate inventory, shipping, and payment with rollback
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Idempotent compensations">
+    Compensation activities should be idempotent - safe to run multiple times in case of retries.
+  </Accordion>
+  
+  <Accordion title="Register immediately">
+    Add compensations right after the activity that requires them - don't defer registration.
+  </Accordion>
+  
+  <Accordion title="Test compensation paths">
+    Always test your saga workflows with simulated failures to ensure compensations work correctly.
+  </Accordion>
+  
+  <Accordion title="Monitor compensation failures">
+    Set up alerts for compensation failures - they indicate potential data inconsistency.
+  </Accordion>
+  
+  <Accordion title="Consider timing">
+    Some compensations may not be instant (e.g., refunds). Document expected timing.
+  </Accordion>
+</AccordionGroup>
+
+## Saga vs Alternatives
+
+<Tabs>
+  <Tab title="Saga">
+    **When to use:**
+    - Multiple independent services/activities
+    - Can't use distributed transactions
+    - Need eventual consistency
+    - Each step can be compensated
+  </Tab>
+  <Tab title="Two-Phase Commit">
+    **When to use:**
+    - Strong consistency required
+    - All participants support 2PC
+    - Can tolerate blocking
+    - Fewer participants
+  </Tab>
+  <Tab title="Try-Confirm-Cancel">
+    **When to use:**
+    - Need reservation phase
+    - Can implement try/confirm/cancel
+    - Want to avoid compensation
+    - Resources can be reserved
+  </Tab>
+</Tabs>
+
+## Related Patterns
+
+- [Child Workflows](/patterns/child-workflows) - Sagas across multiple workflows
+- [Activities](/concepts/activities) - Building blocks for saga steps
+- [Error Handling](/advanced/error-handling) - Managing saga failures

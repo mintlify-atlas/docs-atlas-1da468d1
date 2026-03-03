@@ -1,0 +1,209 @@
+---
+title: timer() & Time Helpers
+description: Pause workflow execution for a specified duration
+---
+
+The `timer()` function and its helper functions pause workflow execution for a specified amount of time. These are essential for implementing delays, timeouts, and scheduled operations.
+
+## timer()
+
+Pauses workflow execution for a specified duration.
+
+### Signature
+
+```php
+function timer(int|string|CarbonInterval $seconds): PromiseInterface
+```
+
+### Parameters
+
+<ParamField path="seconds" type="int|string|CarbonInterval">
+  The duration to wait. Can be:
+  - An integer (seconds)
+  - A string duration (e.g., "5 minutes", "2 hours")
+  - A CarbonInterval instance
+</ParamField>
+
+### Returns
+
+<ResponseField name="PromiseInterface" type="React\Promise\PromiseInterface">
+  A promise that resolves after the specified duration
+</ResponseField>
+
+### Usage
+
+```php
+use Workflow\Workflow;
+use function Workflow\{timer, activity};
+
+class DelayedWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // Wait for 5 seconds
+        yield timer(5);
+        
+        // Wait using string duration
+        yield timer('2 minutes');
+        
+        $result = yield activity(TestActivity::class);
+        
+        return $result;
+    }
+}
+```
+
+## Time Helper Functions
+
+Convenience functions for common time durations.
+
+### seconds()
+
+```php
+function seconds(int $seconds): PromiseInterface
+```
+
+<ParamField path="seconds" type="int">
+  Number of seconds to wait
+</ParamField>
+
+```php
+use function Workflow\seconds;
+
+yield seconds(30); // Wait 30 seconds
+```
+
+### minutes()
+
+```php
+function minutes(int $minutes): PromiseInterface
+```
+
+<ParamField path="minutes" type="int">
+  Number of minutes to wait
+</ParamField>
+
+```php
+use function Workflow\minutes;
+
+yield minutes(5); // Wait 5 minutes
+```
+
+### hours()
+
+```php
+function hours(int $hours): PromiseInterface
+```
+
+<ParamField path="hours" type="int">
+  Number of hours to wait
+</ParamField>
+
+```php
+use function Workflow\hours;
+
+yield hours(2); // Wait 2 hours
+```
+
+### days()
+
+```php
+function days(int $days): PromiseInterface
+```
+
+<ParamField path="days" type="int">
+  Number of days to wait
+</ParamField>
+
+```php
+use function Workflow\days;
+
+yield days(1); // Wait 1 day
+```
+
+### weeks()
+
+```php
+function weeks(int $weeks): PromiseInterface
+```
+
+<ParamField path="weeks" type="int">
+  Number of weeks to wait
+</ParamField>
+
+```php
+use function Workflow\weeks;
+
+yield weeks(1); // Wait 1 week
+```
+
+### months()
+
+```php
+function months(int $months): PromiseInterface
+```
+
+<ParamField path="months" type="int">
+  Number of months to wait
+</ParamField>
+
+```php
+use function Workflow\months;
+
+yield months(1); // Wait 1 month
+```
+
+### years()
+
+```php
+function years(int $years): PromiseInterface
+```
+
+<ParamField path="years" type="int">
+  Number of years to wait
+</ParamField>
+
+```php
+use function Workflow\years;
+
+yield years(1); // Wait 1 year
+```
+
+## Complete Example
+
+```php
+use Workflow\Workflow;
+use function Workflow\{seconds, minutes, hours, days, activity};
+
+class ScheduledTasksWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // Immediate task
+        yield activity(InitialTaskActivity::class);
+        
+        // Wait 30 seconds
+        yield seconds(30);
+        yield activity(QuickFollowUpActivity::class);
+        
+        // Wait 5 minutes
+        yield minutes(5);
+        yield activity(ShortDelayActivity::class);
+        
+        // Wait 1 hour
+        yield hours(1);
+        yield activity(HourlyTaskActivity::class);
+        
+        // Wait 1 day
+        yield days(1);
+        yield activity(DailyTaskActivity::class);
+        
+        return 'completed';
+    }
+}
+```
+
+## Related
+
+- [await()](/api/functions/await) - Wait for a condition
+- [awaitWithTimeout()](/api/functions/await) - Wait for a condition with timeout

@@ -1,0 +1,385 @@
+---
+title: Webhook
+description: Expose workflow methods as HTTP endpoints
+---
+
+## Overview
+
+The `Webhook` attribute automatically exposes workflow methods as HTTP endpoints. It can be applied to workflow classes (to expose the `execute` method) or individual signal methods (to create signal endpoints).
+
+## Basic Usage
+
+### Class-Level Webhook
+
+Apply `Webhook` to the workflow class to create a start endpoint:
+
+```php
+use Workflow\Webhook;
+use Workflow\Workflow;
+
+#[Webhook]
+class OrderWorkflow extends Workflow
+{
+    public function execute(string $orderId, float $amount)
+    {
+        // Process order...
+        return "Order {$orderId} processed";
+    }
+}
+```
+
+This creates a route at `/webhooks/start/order-workflow` that accepts POST requests:
+
+```bash
+curl -X POST http://your-app.com/webhooks/start/order-workflow \
+  -H "Content-Type: application/json" \
+  -d '{"orderId": "12345", "amount": 99.99}'
+```
+
+### Method-Level Webhook
+
+Apply `Webhook` to signal methods to create signal endpoints:
+
+```php
+use Workflow\SignalMethod;
+use Workflow\Webhook;
+use Workflow\Workflow;
+
+class OrderWorkflow extends Workflow
+{
+    private bool $canceled = false;
+
+    #[SignalMethod]
+    #[Webhook]
+    public function cancel(): void
+    {
+        $this->canceled = true;
+    }
+
+    public function execute(string $orderId)
+    {
+        yield await(fn() => $this->canceled);
+        return 'Order canceled';
+    }
+}
+```
+
+This creates a route at `/webhooks/signal/order-workflow/{workflowId}/cancel`:
+
+```bash
+curl -X POST http://your-app.com/webhooks/signal/order-workflow/123/cancel
+```
+
+## How It Works
+
+The `Webhooks` class automatically registers routes during application boot:
+
+1. **Discovery** - Scans the workflows folder for all workflow classes (Webhooks.php:32-46)
+2. **Class detection** - Checks for `Webhook` attribute on classes (Webhooks.php:74-76)
+3. **Method detection** - Checks for `Webhook` attribute on signal methods (Webhooks.php:96, 132-134)
+4. **Route registration** - Creates POST routes with automatic parameter binding (Webhooks.php:70-91, 93-117)
+
+### Route Registration Code
+
+```php
+private static function registerWorkflowWebhooks($workflow, $basePath)
+{
+    $reflection = new ReflectionClass($workflow);
+
+    if (!self::hasWebhookAttributeOnClass($reflection)) {
+        return;
+    }
+
+    foreach ($reflection->getMethods() as $method) {
+        if ($method->getName() === 'execute') {
+            $slug = Str::kebab(class_basename($workflow));
+            Route::post("{$basePath}/start/{$slug}", static function (Request $request) use ($workflow) {
+                $request = self::validateAuth($request);
+                $params = self::resolveNamedParameters($workflow, 'execute', $request->all());
+                WorkflowStub::make($workflow)->start(...$params);
+                return response()->json(['message' => 'Workflow started']);
+            })->name("workflows.start.{$slug}");
+        }
+    }
+}
+```
+
+## Enabling Webhooks
+
+Add the route registration to your `RouteServiceProvider` or `routes/web.php`:
+
+```php
+use Workflow\Webhooks;
+
+// In RouteServiceProvider or routes/web.php
+Webhooks::routes();
+
+// Or with custom namespace and path
+Webhooks::routes('App\\Workflows', app_path('Workflows'));
+```
+
+## Parameter Binding
+
+Webhook routes automatically bind request parameters to method arguments by name:
+
+```php
+#[Webhook]
+class InvoiceWorkflow extends Workflow
+{
+    public function execute(string $customerId, array $items, float $total)
+    {
+        // customerId, items, and total are bound from request
+        return "Invoice created";
+    }
+}
+```
+
+```bash
+curl -X POST http://your-app.com/webhooks/start/invoice-workflow \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customerId": "CUST123",
+    "items": [{"sku": "ITEM1", "qty": 2}],
+    "total": 199.98
+  }'
+```
+
+Parameters are resolved using reflection (Webhooks.php:137-153):
+
+```php
+private static function resolveNamedParameters($class, $method, $payload)
+{
+    $reflection = new ReflectionClass($class);
+    $method = $reflection->getMethod($method);
+    $params = [];
+
+    foreach ($method->getParameters() as $param) {
+        $name = $param->getName();
+        if (array_key_exists($name, $payload)) {
+            $params[$name] = $payload[$name];
+        } elseif ($param->isDefaultValueAvailable()) {
+            $params[$name] = $param->getDefaultValue();
+        }
+    }
+
+    return $params;
+}
+```
+
+## Authentication
+
+Webhooks support multiple authentication methods configured in `config/workflows.php`:
+
+### No Authentication
+
+```php
+'webhook_auth' => [
+    'method' => 'none',
+],
+```
+
+### Token Authentication
+
+```php
+'webhook_auth' => [
+    'method' => 'token',
+    'token' => [
+        'token' => env('WEBHOOK_TOKEN'),
+        'header' => 'Authorization',
+    ],
+],
+```
+
+```bash
+curl -X POST http://your-app.com/webhooks/start/order-workflow \
+  -H "Authorization: your-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{"orderId": "12345"}'
+```
+
+### Signature Authentication
+
+```php
+'webhook_auth' => [
+    'method' => 'signature',
+    'signature' => [
+        'secret' => env('WEBHOOK_SECRET'),
+        'header' => 'X-Signature',
+    ],
+],
+```
+
+The signature is an HMAC-SHA256 hash of the request body:
+
+```php
+$payload = json_encode(['orderId' => '12345']);
+$signature = hash_hmac('sha256', $payload, 'your-secret');
+```
+
+```bash
+curl -X POST http://your-app.com/webhooks/start/order-workflow \
+  -H "X-Signature: $signature" \
+  -H "Content-Type: application/json" \
+  -d '{"orderId": "12345"}'
+```
+
+### Custom Authentication
+
+```php
+'webhook_auth' => [
+    'method' => 'custom',
+    'custom' => [
+        'class' => App\Auth\MyWebhookAuthenticator::class,
+    ],
+],
+```
+
+Implement the `WebhookAuthenticator` interface:
+
+```php
+use Illuminate\Http\Request;
+use Workflow\Auth\WebhookAuthenticator;
+
+class MyWebhookAuthenticator implements WebhookAuthenticator
+{
+    public function validate(Request $request): Request
+    {
+        // Custom validation logic
+        if (!$this->isValid($request)) {
+            abort(401, 'Unauthorized');
+        }
+        return $request;
+    }
+}
+```
+
+## Route Configuration
+
+Customize the webhook base path in `config/workflows.php`:
+
+```php
+'webhooks_route' => 'webhooks',
+```
+
+This creates routes like:
+- `/webhooks/start/{workflow-slug}`
+- `/webhooks/signal/{workflow-slug}/{workflowId}/{signal-name}`
+
+## Route Names
+
+Routes are automatically named for use with Laravel's `route()` helper:
+
+```php
+// Start routes
+route('workflows.start.order-workflow')
+// => /webhooks/start/order-workflow
+
+// Signal routes
+route('workflows.signal.order-workflow.cancel', ['workflowId' => 123])
+// => /webhooks/signal/order-workflow/123/cancel
+```
+
+## Combining Class and Method Webhooks
+
+You can use both on the same workflow:
+
+```php
+#[Webhook]
+class OrderWorkflow extends Workflow
+{
+    #[SignalMethod]
+    #[Webhook]
+    public function cancel(): void
+    {
+        $this->canceled = true;
+    }
+
+    #[SignalMethod]
+    #[Webhook]
+    public function ship(): void
+    {
+        $this->shipped = true;
+    }
+
+    public function execute(string $orderId)
+    {
+        // Process order...
+    }
+}
+```
+
+This creates three endpoints:
+- `POST /webhooks/start/order-workflow` - Start workflow
+- `POST /webhooks/signal/order-workflow/{id}/cancel` - Cancel order
+- `POST /webhooks/signal/order-workflow/{id}/ship` - Ship order
+
+## Response Format
+
+Webhook endpoints return JSON responses:
+
+```json
+// Start workflow
+{
+  "message": "Workflow started"
+}
+
+// Signal workflow
+{
+  "message": "Signal sent"
+}
+
+// Authentication failure
+{
+  "message": "Unauthorized"
+}
+```
+
+## Attribute Target
+
+`Webhook` is the only attribute that can be applied to both classes AND methods:
+
+```php
+#[Attribute(Attribute::TARGET_CLASS | Attribute::TARGET_METHOD)]
+final class Webhook
+{
+}
+```
+
+Other workflow attributes only target methods.
+
+## When to Use Webhook
+
+Use `Webhook` when you need to:
+
+- **External integrations** - Receive events from third-party services (Stripe, GitHub, etc.)
+- **API endpoints** - Expose workflow operations via REST API
+- **Mobile apps** - Allow mobile clients to trigger workflows
+- **Microservices** - Enable other services to start or signal workflows
+- **Scheduled jobs** - Trigger workflows from external schedulers
+
+## Discovery Process
+
+The `Webhooks::routes()` method:
+
+1. Scans the workflows directory recursively (Webhooks.php:48-59)
+2. Finds all PHP files (Webhooks.php:54)
+3. Converts file paths to class names (Webhooks.php:62-68)
+4. Filters for Workflow subclasses (Webhooks.php:40-43)
+5. Checks for `Webhook` attribute on classes and methods (Webhooks.php:74-76, 96)
+6. Registers routes for each webhook-enabled method (Webhooks.php:81-88, 99-114)
+
+## Technical Details
+
+- **Target**: Classes and methods (`Attribute::TARGET_CLASS | Attribute::TARGET_METHOD`)
+- **Route Method**: POST only
+- **Parameter Binding**: Automatic by name with default value support
+- **Authentication**: Configurable per application
+- **Response Type**: JSON
+- **Workflow ID**: Required in URL for signal endpoints
+- **Slug Format**: Kebab-case conversion of class name
+
+## See Also
+
+- [SignalMethod](/api/attributes/signal-method) - Learn about signal methods
+- [WorkflowStub](/api/workflow-stub) - Learn about starting workflows
+- [Authentication](https://laravel.com/docs/authentication) - Laravel authentication docs

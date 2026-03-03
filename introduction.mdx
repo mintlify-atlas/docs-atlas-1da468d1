@@ -1,0 +1,111 @@
+---
+title: Introduction to Durable Workflow
+description: Build reliable, long-running workflows in Laravel with automatic retry and state management
+---
+
+Durable Workflow is a package for the Laravel web framework that provides tools for defining and managing workflows and activities. A workflow is a series of interconnected activities that are executed in a specific order to achieve a desired result. Activities are individual tasks or pieces of logic that are executed as part of a workflow.
+
+## What you can build
+
+Durable Workflow can be used to automate and manage complex processes, including:
+
+<CardGroup cols={2}>
+  <Card title="Agentic workflows" icon="robot" iconType="duotone">
+    AI-driven workflows that make decisions and adapt to changing conditions
+  </Card>
+  <Card title="Financial transactions" icon="money-bill" iconType="duotone">
+    Payment processing, refunds, and multi-step financial operations with automatic rollback
+  </Card>
+  <Card title="Data pipelines" icon="pipe" iconType="duotone">
+    ETL processes, data analysis, and transformation workflows that span multiple systems
+  </Card>
+  <Card title="Microservices orchestration" icon="diagram-project" iconType="duotone">
+    Coordinate complex operations across distributed services with guaranteed execution
+  </Card>
+  <Card title="User signup flows" icon="user-plus" iconType="duotone">
+    Multi-step onboarding processes with email verification, payment, and provisioning
+  </Card>
+  <Card title="Job tracking" icon="list-check" iconType="duotone">
+    Monitor long-running jobs with progress tracking and automatic recovery from failures
+  </Card>
+</CardGroup>
+
+## Key features
+
+By using Durable Workflow, developers can break down large, complex processes into smaller, modular units that can be easily maintained and updated.
+
+<CardGroup cols={2}>
+  <Card title="Declarative PHP classes" icon="code">
+    Define workflows and activities using simple, declarative PHP classes with a clean syntax
+  </Card>
+  <Card title="Queue integration" icon="layer-group">
+    Full integration with Laravel's queue and event systems for asynchronous execution on worker servers
+  </Card>
+  <Card title="Reliable execution" icon="shield-check">
+    Built-in support for handling errors and retries, ensuring workflows execute reliably and consistently
+  </Card>
+  <Card title="Parallel execution" icon="arrows-split-up-and-left">
+    Tools for starting, monitoring, and managing workflows with support for queuing and parallel execution
+  </Card>
+  <Card title="Visual monitoring" icon="chart-line">
+    Monitor workflows with Waterline, a dedicated UI for visualizing workflow execution and debugging
+  </Card>
+  <Card title="Battle-tested" icon="trophy">
+    Used in production by companies running complex workflows at scale with extensive test coverage
+  </Card>
+</CardGroup>
+
+## How it works
+
+Durable Workflow uses Laravel's queue system to execute workflows asynchronously. Each workflow maintains its state in the database, allowing it to survive server restarts, deployments, and failures. When a workflow yields to an activity or timer, its state is persisted, and execution can resume exactly where it left off.
+
+```php
+use function Workflow\activity;
+use Workflow\Workflow;
+
+class OrderWorkflow extends Workflow
+{
+    public function execute($orderId)
+    {
+        // Process payment (activity)
+        $payment = yield activity(ProcessPayment::class, $orderId);
+        
+        // If payment succeeds, fulfill the order
+        $fulfillment = yield activity(FulfillOrder::class, $orderId);
+        
+        // Send confirmation email
+        yield activity(SendConfirmation::class, $orderId, $fulfillment);
+        
+        return $fulfillment;
+    }
+}
+```
+
+<Note>
+Each `yield` point is a durable execution boundary. If your server crashes or restarts, the workflow will automatically resume from the last completed activity.
+</Note>
+
+## Get started
+
+<Card title="Quick start" icon="rocket" href="/quickstart">
+  Follow our quickstart guide to install Durable Workflow and run your first workflow in minutes
+</Card>
+
+## Community and support
+
+Join the growing community of developers using Durable Workflow:
+
+<CardGroup cols={2}>
+  <Card title="GitHub Discussions" icon="github" href="https://github.com/durable-workflow/workflow/discussions">
+    Ask questions and share your workflows
+  </Card>
+  <Card title="Discord" icon="discord" href="https://discord.gg/xu5aDDpqVy">
+    Chat with the community in real-time
+  </Card>
+  <Card title="Sample App" icon="code-branch" href="https://github.com/durable-workflow/sample-app">
+    Explore a complete sample application
+  </Card>
+  <Card title="Waterline UI" icon="chart-mixed" href="https://github.com/durable-workflow/waterline">
+    Monitor and debug your workflows visually
+  </Card>
+</CardGroup>

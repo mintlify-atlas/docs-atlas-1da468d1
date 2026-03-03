@@ -1,80 +1,337 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick start
+description: Create and run your first Durable Workflow in minutes
 ---
 
-## Get started in three steps
+This guide walks you through creating a simple workflow with an activity, running it, and getting the result.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Before starting, ensure you have:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+- [Installed Durable Workflow](/installation)
+- A Laravel queue worker running (`php artisan queue:work`)
+- Completed the database migrations
+
+## Create your first workflow
+
+<Steps>
+  <Step title="Create a workflow class">
+    Create a new workflow that greets a user:
+
+    ```php app/Workflows/GreetingWorkflow.php
+    <?php
+
+    namespace App\Workflows;
+
+    use function Workflow\activity;
+    use Workflow\Workflow;
+
+    class GreetingWorkflow extends Workflow
+    {
+        public function execute($name)
+        {
+            $result = yield activity(GreetingActivity::class, $name);
+
+            return $result;
+        }
+    }
+    ```
+
+    <Note>
+      The `execute` method is called when your workflow runs. Use `yield` to call activities and other async operations.
+    </Note>
+  </Step>
+
+  <Step title="Create an activity class">
+    Create the activity that performs the actual greeting:
+
+    ```php app/Activities/GreetingActivity.php
+    <?php
+
+    namespace App\Activities;
+
+    use Workflow\Activity;
+
+    class GreetingActivity extends Activity
+    {
+        public function execute($name)
+        {
+            return "Hello, {$name}!";
+        }
+    }
+    ```
+
+    Activities contain your business logic. They can:
+    - Call external APIs
+    - Query databases
+    - Perform calculations
+    - Send emails
+    - Any other side-effecting operation
+  </Step>
+
+  <Step title="Start the workflow">
+    Use `WorkflowStub` to start your workflow:
+
+    ```php routes/web.php
+    use Workflow\WorkflowStub;
+    use App\Workflows\GreetingWorkflow;
+
+    Route::get('/greet/{name}', function ($name) {
+        $workflow = WorkflowStub::make(GreetingWorkflow::class);
+        $workflow->start($name);
+        
+        return response()->json([
+            'workflow_id' => $workflow->id(),
+            'status' => 'started'
+        ]);
+    });
+    ```
+
+    The workflow runs asynchronously on your queue. The `start()` method returns immediately.
+  </Step>
+
+  <Step title="Get the workflow result">
+    Retrieve the workflow output once it completes:
+
+    ```php routes/web.php
+    Route::get('/result/{workflowId}', function ($workflowId) {
+        $workflow = WorkflowStub::load($workflowId);
+        
+        if (!$workflow->running()) {
+            return response()->json([
+                'output' => $workflow->output(),
+                'status' => 'completed'
+            ]);
+        }
+        
+        return response()->json([
+            'status' => 'running'
+        ]);
+    });
+    ```
+
+    <Tip>
+      Use `$workflow->running()` to check if a workflow is still executing. The `output()` method returns the final result from the `execute()` method.
+    </Tip>
+  </Step>
+</Steps>
+
+## Run the workflow
+
+Now test your workflow:
+
+<CodeGroup>
+```bash cURL
+curl http://your-app.test/greet/World
+```
+
+```bash HTTPie
+http GET http://your-app.test/greet/World
+```
+</CodeGroup>
+
+Response:
+```json
+{
+  "workflow_id": "01H9X7K8M5N6P7Q8R9S0T1V2W3",
+  "status": "started"
+}
+```
+
+Then check the result:
+
+```bash
+curl http://your-app.test/result/01H9X7K8M5N6P7Q8R9S0T1V2W3
+```
+
+Response:
+```json
+{
+  "output": "Hello, World!",
+  "status": "completed"
+}
+```
+
+## Add multiple activities
+
+Workflows can execute multiple activities in sequence:
+
+```php app/Workflows/OnboardingWorkflow.php
+<?php
+
+namespace App\Workflows;
+
+use function Workflow\activity;
+use Workflow\Workflow;
+
+class OnboardingWorkflow extends Workflow
+{
+    public function execute($userId)
+    {
+        // Create user account
+        $user = yield activity(CreateUserActivity::class, $userId);
+        
+        // Send welcome email
+        yield activity(SendWelcomeEmailActivity::class, $user);
+        
+        // Provision resources
+        $resources = yield activity(ProvisionResourcesActivity::class, $user);
+        
+        return [
+            'user' => $user,
+            'resources' => $resources
+        ];
+    }
+}
+```
+
+Each activity executes in order. If any activity fails, the workflow automatically retries with exponential backoff.
+
+## Add a timer
+
+Delay execution using timers:
+
+```php app/Workflows/ReminderWorkflow.php
+<?php
+
+namespace App\Workflows;
+
+use function Workflow\{activity, timer};
+use Workflow\Workflow;
+
+class ReminderWorkflow extends Workflow
+{
+    public function execute($userId)
+    {
+        // Send first reminder immediately
+        yield activity(SendReminderActivity::class, $userId, 1);
+        
+        // Wait 24 hours
+        yield timer(60 * 60 * 24);
+        
+        // Send second reminder
+        yield activity(SendReminderActivity::class, $userId, 2);
+        
+        // Wait another 24 hours
+        yield timer(60 * 60 * 24);
+        
+        // Send final reminder
+        yield activity(SendReminderActivity::class, $userId, 3);
+        
+        return 'reminders_sent';
+    }
+}
+```
+
+<Note>
+  Timers are durable. Even if your server restarts during the wait period, the workflow will resume at the correct time.
+</Note>
+
+## Handle signals
+
+Workflows can receive signals from external sources:
+
+```php app/Workflows/ApprovalWorkflow.php
+<?php
+
+namespace App\Workflows;
+
+use function Workflow\{activity, await};
+use Workflow\{Workflow, SignalMethod};
+
+class ApprovalWorkflow extends Workflow
+{
+    private bool $approved = false;
+    private bool $rejected = false;
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    #[SignalMethod]
+    public function approve(): void
+    {
+        $this->approved = true;
+    }
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    #[SignalMethod]
+    public function reject(): void
+    {
+        $this->rejected = true;
+    }
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    public function execute($requestId)
+    {
+        // Send approval request
+        yield activity(SendApprovalRequestActivity::class, $requestId);
+        
+        // Wait for approval or rejection
+        yield await(fn() => $this->approved || $this->rejected);
+        
+        if ($this->approved) {
+            yield activity(ProcessApprovalActivity::class, $requestId);
+            return 'approved';
+        }
+        
+        yield activity(ProcessRejectionActivity::class, $requestId);
+        return 'rejected';
+    }
+}
+```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+Send a signal to the workflow:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+```php
+$workflow = WorkflowStub::load($workflowId);
+$workflow->approve(); // or $workflow->reject()
+```
 
-### Step 3: Go live
+## Use dependency injection
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+Both workflows and activities support Laravel's dependency injection:
+
+```php app/Activities/NotifyUserActivity.php
+<?php
+
+namespace App\Activities;
+
+use Illuminate\Contracts\Mail\Mailer;
+use Workflow\Activity;
+
+class NotifyUserActivity extends Activity
+{
+    public function execute(Mailer $mailer, $userId, $message)
+    {
+        // Laravel automatically injects the Mailer
+        $mailer->to($userId)->send(new NotificationMail($message));
+        
+        return true;
+    }
+}
+```
+
+<Warning>
+  Only the first parameter(s) that don't match the workflow arguments will be resolved from the container. In the example above, `$mailer` is injected, but `$userId` and `$message` come from the workflow.
+</Warning>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
+Now that you've created your first workflow, explore more advanced features:
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Workflows" icon="diagram-project" href="/concepts/workflows">
+    Learn about workflow concepts and patterns
+  </Card>
+  <Card title="Activities" icon="bolt" href="/concepts/activities">
+    Understand how to structure activities
+  </Card>
+  <Card title="Signals & Queries" icon="signal" href="/patterns/signals">
+    Interact with running workflows
+  </Card>
+  <Card title="Error handling" icon="triangle-exclamation" href="/advanced/error-handling">
+    Handle failures and implement retries
+  </Card>
+  <Card title="Child workflows" icon="sitemap" href="/patterns/child-workflows">
+    Compose complex workflows from smaller ones
+  </Card>
+  <Card title="Waterline UI" icon="chart-line" href="/monitoring/waterline">
+    Monitor workflows visually
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

@@ -1,0 +1,206 @@
+---
+title: Child Workflows
+description: Execute workflows within workflows to build complex, hierarchical orchestrations
+---
+
+Child workflows allow you to execute one workflow from within another, creating hierarchical workflow compositions. This pattern is useful for breaking down complex business logic into smaller, reusable workflow components.
+
+## Overview
+
+Child workflows execute independently but are managed by their parent workflow. They inherit certain properties from the parent (like queue and connection settings) but maintain their own execution state and history.
+
+## Basic Usage
+
+Use the `child()` helper function to execute a child workflow:
+
+```php
+use Workflow\Workflow;
+use function Workflow\{child, activity};
+
+class OrderWorkflow extends Workflow
+{
+    public function execute($orderId)
+    {
+        // Execute child workflow
+        $paymentResult = yield child(PaymentWorkflow::class, $orderId);
+        
+        // Execute activity after child completes
+        $result = yield activity(FulfillOrderActivity::class, $orderId);
+        
+        return $result;
+    }
+}
+```
+
+## Multiple Child Workflows
+
+You can execute multiple child workflows sequentially or in parallel:
+
+### Sequential Execution
+
+```php
+public function execute()
+{
+    $result1 = yield child(FirstWorkflow::class);
+    $result2 = yield child(SecondWorkflow::class, $result1);
+    $result3 = yield child(ThirdWorkflow::class, $result2);
+    
+    return $result3;
+}
+```
+
+### Parallel Execution
+
+```php
+use Workflow\ChildWorkflowStub;
+
+public function execute($orderIds)
+{
+    $promises = [];
+    
+    foreach ($orderIds as $orderId) {
+        $promises[] = child(ProcessOrderWorkflow::class, $orderId);
+    }
+    
+    // Wait for all child workflows to complete
+    $results = yield ChildWorkflowStub::all($promises);
+    
+    return $results;
+}
+```
+
+<Note>
+Child workflows can also be executed in parallel using the `all()` helper function from the `Workflow` namespace.
+</Note>
+
+## Passing Options
+
+Child workflows inherit the parent's queue and connection settings by default, but you can override them:
+
+```php
+use Workflow\WorkflowOptions;
+
+public function execute()
+{
+    $options = new WorkflowOptions(
+        connection: 'redis',
+        queue: 'high-priority'
+    );
+    
+    $result = yield child(
+        ImportantWorkflow::class,
+        $param1,
+        $param2,
+        $options
+    );
+    
+    return $result;
+}
+```
+
+## Child Workflow Lifecycle
+
+<Steps>
+  <Step title="Parent yields child">
+    The parent workflow yields a child workflow using `child()`
+  </Step>
+  <Step title="Child starts">
+    The child workflow is created and started with the provided arguments
+  </Step>
+  <Step title="Parent waits">
+    The parent workflow pauses execution and waits for the child to complete
+  </Step>
+  <Step title="Child completes">
+    The child workflow executes and completes (or fails)
+  </Step>
+  <Step title="Parent resumes">
+    The parent workflow resumes with the child's result
+  </Step>
+</Steps>
+
+## Signaling Child Workflows
+
+You can send signals to child workflows from the parent:
+
+```php
+public function execute()
+{
+    // Start a long-running child workflow
+    $childPromise = child(LongRunningWorkflow::class);
+    
+    // Get the child workflow instance
+    $childWorkflow = WorkflowStub::find($childWorkflowId);
+    
+    // Send a signal to the child
+    $childWorkflow->updateStatus('Processing');
+    
+    // Wait for child to complete
+    $result = yield $childPromise;
+    
+    return $result;
+}
+```
+
+## Error Handling
+
+If a child workflow fails, the exception is propagated to the parent:
+
+```php
+public function execute()
+{
+    try {
+        $result = yield child(RiskyWorkflow::class);
+    } catch (\Exception $e) {
+        // Handle child workflow failure
+        yield activity(LogErrorActivity::class, $e->getMessage());
+        
+        // Optionally retry with different parameters
+        $result = yield child(FallbackWorkflow::class);
+    }
+    
+    return $result;
+}
+```
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Decomposition" icon="sitemap">
+    Break complex workflows into smaller, manageable pieces
+  </Card>
+  <Card title="Reusability" icon="recycle">
+    Reuse common workflow patterns across multiple parent workflows
+  </Card>
+  <Card title="Isolation" icon="shield">
+    Isolate failure domains - child failures don't automatically fail the parent
+  </Card>
+  <Card title="Fan-out" icon="diagram-project">
+    Process multiple items in parallel using child workflows
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Keep child workflows focused">
+    Each child workflow should have a single, well-defined responsibility. This makes them easier to test and reuse.
+  </Accordion>
+  
+  <Accordion title="Use appropriate granularity">
+    Don't create child workflows for trivial operations - use activities instead. Child workflows are best for complex, multi-step processes.
+  </Accordion>
+  
+  <Accordion title="Handle failures gracefully">
+    Always consider how child workflow failures should be handled in the parent. Use try-catch blocks or saga patterns as needed.
+  </Accordion>
+  
+  <Accordion title="Monitor depth">
+    Avoid deeply nested child workflows (more than 2-3 levels) as they can become difficult to debug and monitor.
+  </Accordion>
+</AccordionGroup>
+
+## Related Patterns
+
+- [Signals](/patterns/signals) - Communicate with child workflows
+- [Sagas](/patterns/sagas) - Handle failures across multiple workflows
+- [Continue as New](/patterns/continue-as-new) - Manage long-running workflows

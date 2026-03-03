@@ -1,0 +1,176 @@
+---
+title: continueAsNew()
+description: Continue a workflow execution with new arguments
+---
+
+The `continueAsNew()` function allows a workflow to continue its execution with new arguments while maintaining the same workflow ID. This is useful for implementing loops, recursion, or long-running workflows that need to reset their state.
+
+## Signature
+
+```php
+function continueAsNew(...$arguments): PromiseInterface
+```
+
+## Parameters
+
+<ParamField path="arguments" type="mixed">
+  New arguments to pass to the workflow's execute method. These will be used when the workflow restarts
+</ParamField>
+
+## Returns
+
+<ResponseField name="PromiseInterface" type="React\Promise\PromiseInterface">
+  A promise that triggers the workflow to restart with new arguments
+</ResponseField>
+
+## Why Use continueAsNew()?
+
+Long-running workflows can accumulate a large event history, which impacts performance and storage. The `continueAsNew()` function allows you to:
+
+- Reset the workflow's event history
+- Implement loops without unbounded history growth
+- Continue processing with updated parameters
+- Maintain the same workflow ID and context
+
+## Usage
+
+```php
+use Workflow\Workflow;
+use function Workflow\{activity, continueAsNew};
+
+class CounterWorkflow extends Workflow
+{
+    public function execute(int $count = 0, int $totalCount = 3)
+    {
+        // Process current iteration
+        $result = yield activity(ProcessActivity::class, $count);
+        
+        // Check if we should continue
+        if ($count >= $totalCount) {
+            return 'workflow_' . $result;
+        }
+        
+        // Continue as new with incremented count
+        return yield continueAsNew($count + 1, $totalCount);
+    }
+}
+```
+
+## Example: Periodic Processing
+
+```php
+use Workflow\Workflow;
+use function Workflow\{activity, continueAsNew, hours};
+
+class PeriodicDataProcessorWorkflow extends Workflow
+{
+    public function execute(int $processedBatches = 0, int $maxBatches = 100)
+    {
+        // Process a batch of data
+        $batchResult = yield activity(ProcessDataBatchActivity::class);
+        
+        $processedBatches++;
+        
+        // Check if we've reached the limit
+        if ($processedBatches >= $maxBatches) {
+            return "Completed {$processedBatches} batches";
+        }
+        
+        // Wait 1 hour before next batch
+        yield hours(1);
+        
+        // Continue with updated count
+        return yield continueAsNew($processedBatches, $maxBatches);
+    }
+}
+```
+
+## Example: State Machine
+
+```php
+use Workflow\Workflow;
+use function Workflow\{activity, continueAsNew};
+
+class OrderStateMachineWorkflow extends Workflow
+{
+    public function execute(string $state = 'pending', array $orderData = [])
+    {
+        $result = match ($state) {
+            'pending' => yield activity(ValidateOrderActivity::class, $orderData),
+            'validated' => yield activity(ProcessPaymentActivity::class, $orderData),
+            'paid' => yield activity(FulfillOrderActivity::class, $orderData),
+            'fulfilled' => yield activity(ShipOrderActivity::class, $orderData),
+            'shipped' => 'completed',
+        };
+        
+        if ($state === 'shipped') {
+            return $result;
+        }
+        
+        // Determine next state
+        $nextState = match ($state) {
+            'pending' => 'validated',
+            'validated' => 'paid',
+            'paid' => 'fulfilled',
+            'fulfilled' => 'shipped',
+        };
+        
+        // Continue to next state
+        return yield continueAsNew($nextState, $orderData);
+    }
+}
+```
+
+## Example: Polling with Backoff
+
+```php
+use Workflow\Workflow;
+use function Workflow\{activity, continueAsNew, minutes};
+
+class PollingWorkflow extends Workflow
+{
+    public function execute(int $attempt = 0, int $maxAttempts = 10)
+    {
+        // Check external system
+        $status = yield activity(CheckExternalSystemActivity::class);
+        
+        if ($status === 'ready') {
+            return 'System is ready';
+        }
+        
+        $attempt++;
+        
+        if ($attempt >= $maxAttempts) {
+            return 'Max attempts reached';
+        }
+        
+        // Wait with exponential backoff
+        $waitTime = min(30, pow(2, $attempt));
+        yield minutes($waitTime);
+        
+        // Continue polling
+        return yield continueAsNew($attempt, $maxAttempts);
+    }
+}
+```
+
+## Important Notes
+
+- The workflow maintains the same workflow ID
+- The event history is reset, reducing storage
+- All workflow state is reset; only the new arguments are preserved
+- Use sparingly to avoid losing important workflow context
+- Cannot be combined with other return values
+
+## Best Practices
+
+1. Use for long-running loops or recurring tasks
+2. Pass minimal state through arguments
+3. Consider alternatives like signals for state updates
+4. Document the continuation logic clearly
+5. Set reasonable limits to prevent infinite loops
+
+## Related
+
+- [child()](/api/functions/child) - Execute child workflows
+- [activity()](/api/functions/activity) - Execute activities

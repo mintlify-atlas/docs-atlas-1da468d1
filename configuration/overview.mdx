@@ -1,0 +1,76 @@
+---
+title: Configuration Overview
+description: Learn how to configure Durable Workflow for your Laravel application
+---
+
+Durable Workflow provides a flexible configuration system that allows you to customize how workflows are stored, executed, and managed in your Laravel application.
+
+## Configuration File
+
+The main configuration file is located at `config/workflows.php`. You can publish this configuration file using:
+
+```bash
+php artisan vendor:publish --provider="Workflow\Providers\WorkflowServiceProvider"
+```
+
+## Key Configuration Areas
+
+### Workflows Folder
+
+Defines where your workflow classes are stored in your application.
+
+```php
+'workflows_folder' => 'Workflows',
+```
+
+### Database Models
+
+Customize the Eloquent models used for persisting workflow data:
+
+- `stored_workflow_model` - Main workflow instances
+- `stored_workflow_exception_model` - Workflow exceptions
+- `stored_workflow_log_model` - Activity execution logs
+- `stored_workflow_signal_model` - External signals
+- `stored_workflow_timer_model` - Scheduled timers
+
+### Serialization
+
+Configure how workflow data is serialized and stored:
+
+```php
+'serializer' => Workflow\Serializers\Y::class,
+```
+
+### Data Retention
+
+Control how long completed workflows are kept:
+
+```php
+'prune_age' => '1 month',
+```
+
+## Configuration Topics
+
+<CardGroup cols={2}>
+  <Card title="Queue Configuration" icon="list" href="/configuration/queues">
+    Configure Laravel queues for workflow execution
+  </Card>
+  <Card title="Database Setup" icon="database" href="/configuration/database">
+    Set up database tables and connections
+  </Card>
+  <Card title="Configuration Options" icon="sliders" href="/configuration/options">
+    Complete reference of all configuration options
+  </Card>
+</CardGroup>
+
+## Environment Variables
+
+Many configuration options can be overridden using environment variables:
+
+```env
+WORKFLOW_WEBHOOKS_ROUTE=webhooks
+WORKFLOW_WEBHOOKS_AUTH_METHOD=none
+WORKFLOW_WEBHOOKS_SECRET=your-secret-key
+```
+
+See the [Configuration Options](/configuration/options) page for a complete list of available environment variables.

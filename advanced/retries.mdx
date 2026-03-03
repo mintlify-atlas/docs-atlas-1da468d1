@@ -1,0 +1,582 @@
+---
+title: 'Retry Strategies'
+description: 'Configure automatic retries and backoff strategies for activities'
+icon: 'rotate-right'
+---
+
+## Overview
+
+Activities automatically retry when they fail. This is essential for handling transient failures like network timeouts, rate limits, and temporary service outages.
+
+## Default Retry Behavior
+
+From `src/Activity.php:37-39,77-80`, activities have unlimited retries:
+
+```php
+public $tries = PHP_INT_MAX;        // Unlimited attempts
+public $maxExceptions = PHP_INT_MAX; // Unlimited exceptions
+
+public function backoff()
+{
+    return [1, 2, 5, 10, 15, 30, 60, 120]; // seconds
+}
+```
+
+**Default Schedule:**
+- Initial attempt: immediate
+- 1st retry: wait 1 second
+- 2nd retry: wait 2 seconds
+- 3rd retry: wait 5 seconds
+- 4th retry: wait 10 seconds
+- 5th retry: wait 15 seconds
+- 6th retry: wait 30 seconds
+- 7th retry: wait 60 seconds
+- 8th+ retry: wait 120 seconds (continues indefinitely)
+
+## Custom Backoff Strategies
+
+Override the `backoff()` method to customize retry timing:
+
+### Exponential Backoff
+
+Double the delay between each retry:
+
+```php
+use Workflow\Activity;
+
+class ApiActivity extends Activity
+{
+    public function backoff()
+    {
+        // 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s
+        return [1, 2, 4, 8, 16, 32, 64, 128];
+    }
+}
+```
+
+### Linear Backoff
+
+Increase delay by a fixed amount:
+
+```php
+class EmailActivity extends Activity
+{
+    public function backoff()
+    {
+        // 10s, 20s, 30s, 40s, 50s, 60s
+        return [10, 20, 30, 40, 50, 60];
+    }
+}
+```
+
+### Fibonacci Backoff
+
+Use Fibonacci sequence for organic growth:
+
+```php
+class PaymentActivity extends Activity
+{
+    public function backoff()
+    {
+        // 1s, 1s, 2s, 3s, 5s, 8s, 13s, 21s, 34s, 55s
+        return [1, 1, 2, 3, 5, 8, 13, 21, 34, 55];
+    }
+}
+```
+
+### Immediate Retries with Backoff
+
+Retry quickly at first, then slow down:
+
+```php
+class DatabaseActivity extends Activity
+{
+    public function backoff()
+    {
+        // 0s, 0s, 1s, 5s, 10s, 30s, 60s
+        return [0, 0, 1, 5, 10, 30, 60];
+    }
+}
+```
+
+### Custom Backoff with Jitter
+
+Add randomness to prevent thundering herd:
+
+```php
+class ApiCallActivity extends Activity
+{
+    public function backoff()
+    {
+        return collect([1, 2, 4, 8, 16, 32, 64])
+            ->map(function ($delay) {
+                // Add 0-25% random jitter
+                $jitter = rand(0, $delay * 0.25);
+                return $delay + $jitter;
+            })
+            ->toArray();
+    }
+}
+```
+
+### Time-of-Day Aware Backoff
+
+Adjust retries based on time:
+
+```php
+class BusinessHoursActivity extends Activity
+{
+    public function backoff()
+    {
+        $hour = now()->hour;
+        
+        // Faster retries during business hours
+        if ($hour >= 9 && $hour <= 17) {
+            return [1, 2, 5, 10, 15]; // Quick
+        }
+        
+        // Slower retries off-hours
+        return [30, 60, 120, 300]; // Patient
+    }
+}
+```
+
+## Limiting Retry Attempts
+
+By default, activities retry indefinitely. Limit retries by overriding `$tries`:
+
+```php
+class CriticalActivity extends Activity
+{
+    public $tries = 5; // Only 5 total attempts
+    
+    public function backoff()
+    {
+        return [1, 5, 10, 30];
+    }
+}
+```
+
+**Note:** Array length of `backoff()` should match `$tries - 1`.
+
+### Limiting by Time
+
+Retry for a maximum duration:
+
+```php
+class TimeBoxedActivity extends Activity
+{
+    public $timeout = 300; // 5 minutes
+    
+    public function backoff()
+    {
+        // Will stop retrying after 5 minutes total
+        return [10, 20, 30, 40, 50, 60, 60, 60];
+    }
+}
+```
+
+### Limiting by Exception Count
+
+Stop after a certain number of failures:
+
+```php
+class FragileActivity extends Activity
+{
+    public $maxExceptions = 3; // Fail after 3 exceptions
+    
+    public function backoff()
+    {
+        return [1, 5, 10];
+    }
+}
+```
+
+## Non-Retryable Exceptions
+
+Some failures shouldn't be retried (validation errors, resource not found, etc.):
+
+```php
+use Workflow\Exceptions\NonRetryableException;
+use Workflow\Exceptions\NonRetryableExceptionContract;
+
+class OrderActivity extends Activity
+{
+    public function execute($orderId)
+    {
+        $order = Order::find($orderId);
+        
+        // Don't retry if order doesn't exist
+        if (!$order) {
+            throw new NonRetryableException(
+                "Order {$orderId} not found"
+            );
+        }
+        
+        // This will retry on failure
+        return $this->processOrder($order);
+    }
+}
+```
+
+From `src/Activity.php:127-129`, when a `NonRetryableExceptionContract` is thrown:
+```php
+if ($throwable instanceof NonRetryableExceptionContract) {
+    $this->fail($throwable);
+}
+```
+
+The activity immediately fails without retrying.
+
+### Custom Non-Retryable Exceptions
+
+```php
+use Workflow\Exceptions\NonRetryableExceptionContract;
+
+class ValidationException extends \Exception implements NonRetryableExceptionContract
+{
+    //
+}
+
+class ResourceNotFoundException extends \Exception implements NonRetryableExceptionContract
+{
+    //
+}
+
+class PermissionDeniedException extends \Exception implements NonRetryableExceptionContract
+{
+    //
+}
+```
+
+## Conditional Retries
+
+Retry only for specific exception types:
+
+```php
+class SmartActivity extends Activity
+{
+    public function execute($data)
+    {
+        try {
+            return $this->apiCall($data);
+        } catch (RateLimitException $e) {
+            // Let it retry with backoff
+            throw $e;
+        } catch (ValidationException $e) {
+            // Don't retry validation errors
+            throw new NonRetryableException($e->getMessage(), 0, $e);
+        } catch (NetworkException $e) {
+            // Retry network errors
+            throw $e;
+        }
+    }
+    
+    public function backoff()
+    {
+        return [1, 2, 5, 10, 30, 60];
+    }
+}
+```
+
+## Dynamic Backoff
+
+Calculate backoff based on exception details:
+
+```php
+class RateLimitedActivity extends Activity
+{
+    private ?int $retryAfter = null;
+    
+    public function execute($endpoint)
+    {
+        try {
+            return Http::get($endpoint)->json();
+        } catch (RateLimitException $e) {
+            // Extract retry-after from exception
+            $this->retryAfter = $e->getRetryAfter();
+            throw $e;
+        }
+    }
+    
+    public function backoff()
+    {
+        // Use API's retry-after value if available
+        if ($this->retryAfter) {
+            return [$this->retryAfter];
+        }
+        
+        // Default backoff
+        return [10, 30, 60, 120];
+    }
+}
+```
+
+## Retry Queue Configuration
+
+Control which queue and connection handle retries:
+
+```php
+class HighPriorityActivity extends Activity
+{
+    public $connection = 'redis';
+    public $queue = 'high-priority';
+    
+    public function backoff()
+    {
+        return [1, 2, 5];
+    }
+}
+```
+
+From `src/Activity.php:57-72`, queue configuration is inherited from workflow options.
+
+## Monitoring Retries
+
+Track retry behavior:
+
+```php
+use Workflow\Events\ActivityFailed;
+
+Event::listen(ActivityFailed::class, function ($event) {
+    Log::info('Activity retry', [
+        'workflow_id' => $event->workflowId,
+        'activity' => $event->class,
+        'attempt' => $event->attempts ?? 'unknown',
+    ]);
+    
+    // Alert if many retries
+    $exceptions = StoredWorkflow::find($event->workflowId)
+        ->exceptions()
+        ->where('class', $event->class)
+        ->count();
+    
+    if ($exceptions > 5) {
+        Slack::send("Activity {$event->class} has failed {$exceptions} times");
+    }
+});
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Start Conservative">
+    Begin with short delays and increase gradually:
+    ```php
+    // ✅ Good - starts fast, slows down
+    return [1, 2, 5, 10, 30, 60];
+    
+    // ❌ Bad - too aggressive
+    return [0, 0, 0, 1, 1, 1];
+    ```
+  </Accordion>
+
+  <Accordion title="Consider External Rate Limits">
+    Match your backoff to API rate limits:
+    ```php
+    // If API allows 100 requests/minute
+    public function backoff()
+    {
+        // 60s / 100 = 0.6s minimum between requests
+        return [1, 2, 5, 10, 30, 60];
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Add Jitter for Distributed Systems">
+    Prevent thundering herd when many workers retry simultaneously:
+    ```php
+    public function backoff()
+    {
+        return collect([1, 2, 5, 10, 30])
+            ->map(fn($d) => $d + rand(0, (int)($d * 0.2)))
+            ->toArray();
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Use Timeout with Retries">
+    Prevent indefinite execution:
+    ```php
+    public $timeout = 600; // 10 minutes total
+    public $tries = 10;    // Max 10 attempts
+    
+    public function backoff()
+    {
+        // Total: ~60s if all fail
+        return [1, 2, 3, 5, 8, 13, 21, 34];
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Make Activities Idempotent">
+    Ensure retries are safe:
+    ```php
+    public function execute($orderId)
+    {
+        // Check if already processed
+        if (Payment::where('order_id', $orderId)->exists()) {
+            return Payment::where('order_id', $orderId)->first();
+        }
+        
+        // Process with idempotency key
+        return $this->gateway->charge(
+            amount: $this->amount,
+            idempotency_key: "order_{$orderId}"
+        );
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Common Patterns
+
+### Circuit Breaker Pattern
+
+Stop retrying if service is consistently down:
+
+```php
+class CircuitBreakerActivity extends Activity
+{
+    public function execute($endpoint)
+    {
+        $failures = Cache::get("failures:{$endpoint}", 0);
+        
+        // Circuit open - service is down
+        if ($failures > 5) {
+            $lastFailure = Cache::get("last_failure:{$endpoint}");
+            
+            // Wait 5 minutes before trying again
+            if ($lastFailure && $lastFailure->addMinutes(5)->isFuture()) {
+                throw new NonRetryableException('Circuit breaker open');
+            }
+            
+            // Reset circuit
+            Cache::forget("failures:{$endpoint}");
+        }
+        
+        try {
+            $result = Http::get($endpoint)->throw()->json();
+            Cache::forget("failures:{$endpoint}");
+            return $result;
+        } catch (\Exception $e) {
+            Cache::increment("failures:{$endpoint}");
+            Cache::put("last_failure:{$endpoint}", now());
+            throw $e;
+        }
+    }
+    
+    public function backoff()
+    {
+        return [1, 5, 10, 30];
+    }
+}
+```
+
+### Gradual Backoff
+
+Increase delays after each failure:
+
+```php
+class GradualBackoffActivity extends Activity
+{
+    public function backoff()
+    {
+        $attempt = $this->attempts() ?? 0;
+        
+        // Double the delay with each attempt
+        return [min(300, pow(2, $attempt))];
+    }
+}
+```
+
+### Scheduled Retries
+
+Retry at specific times:
+
+```php
+class ScheduledRetryActivity extends Activity
+{
+    public function backoff()
+    {
+        $now = now();
+        $nextBusinessHour = $now->copy()
+            ->setHour(9)
+            ->setMinute(0);
+        
+        if ($now->hour >= 17) {
+            // After 5pm, wait until 9am next day
+            $nextBusinessHour->addDay();
+        }
+        
+        $secondsUntil = $now->diffInSeconds($nextBusinessHour);
+        
+        return [$secondsUntil, 3600, 7200]; // Then hourly
+    }
+}
+```
+
+## Testing Retry Logic
+
+```php
+use Illuminate\Foundation\Testing\RefreshDatabase;
+
+class RetryTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_activity_retries_with_backoff()
+    {
+        // Track attempts
+        $attempts = 0;
+        
+        // Mock service to fail 3 times
+        Http::fake(function () use (&$attempts) {
+            $attempts++;
+            
+            if ($attempts < 3) {
+                return Http::response(['error' => 'timeout'], 500);
+            }
+            
+            return Http::response(['success' => true], 200);
+        });
+
+        $workflow = WorkflowStub::make(ApiWorkflow::class);
+        $result = $workflow->start('test');
+
+        $this->assertEquals(3, $attempts);
+        $this->assertTrue($result);
+    }
+
+    public function test_non_retryable_exception()
+    {
+        $this->expectException(NonRetryableException::class);
+
+        $workflow = WorkflowStub::make(ValidationWorkflow::class);
+        $workflow->start(invalidData: true);
+        
+        // Should fail immediately without retries
+    }
+
+    public function test_max_retries_reached()
+    {
+        Http::fake(fn() => Http::response(['error' => 'fail'], 500));
+
+        $this->expectException(\Exception::class);
+
+        $workflow = WorkflowStub::make(LimitedRetryWorkflow::class);
+        $workflow->start();
+
+        // Check that it tried exactly $tries times
+        $exceptions = StoredWorkflow::first()->exceptions()->count();
+        $this->assertEquals(5, $exceptions);
+    }
+}
+```
+
+## Related Topics
+
+- [Error Handling](/advanced/error-handling) - Exception handling strategies
+- [Activities](/concepts/activities) - Activity basics
+- [Middleware](/advanced/middleware) - Retry middleware
+- [Queue Configuration](/configuration/queues) - Queue settings

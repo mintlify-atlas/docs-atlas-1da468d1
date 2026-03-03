@@ -1,0 +1,232 @@
+---
+title: QueryMethod
+description: Mark workflow methods that read state without modifying execution
+---
+
+## Overview
+
+The `QueryMethod` attribute marks public methods in your workflow that read the current state without modifying it or triggering workflow execution. Query methods provide a synchronous way to inspect workflow state at any time.
+
+## Basic Usage
+
+```php
+use Workflow\QueryMethod;
+use Workflow\Workflow;
+
+class OrderWorkflow extends Workflow
+{
+    private bool $canceled = false;
+
+    #[SignalMethod]
+    public function cancel(): void
+    {
+        $this->canceled = true;
+    }
+
+    #[QueryMethod]
+    public function isCanceled(): bool
+    {
+        return $this->canceled;
+    }
+
+    public function execute()
+    {
+        yield await(fn() => $this->canceled);
+        return 'Order canceled';
+    }
+}
+```
+
+## How It Works
+
+When you call a query method on a `WorkflowStub`, the framework:
+
+1. **Detects the attribute** - `WorkflowStub` uses reflection to identify methods marked with `QueryMethod` (WorkflowStub.php:352-366)
+2. **Loads the active workflow** - Retrieves the current workflow state from the database (WorkflowStub.php:85)
+3. **Instantiates the workflow** - Creates a new workflow instance with the current state (WorkflowStub.php:87)
+4. **Calls the query method** - Executes the method and returns the result immediately (WorkflowStub.php:88)
+5. **No execution triggered** - The workflow does NOT resume or dispatch any jobs
+
+```php
+if (self::isQueryMethod($this->storedWorkflow->class, $method)) {
+    $activeWorkflow = $this->storedWorkflow->active();
+
+    return (new $activeWorkflow->class($activeWorkflow, ...$activeWorkflow->workflowArguments()))
+        ->query($method);
+}
+```
+
+## Query Methods Return Values
+
+Unlike signal methods (which return void), query methods can return any value:
+
+```php
+class TimerWorkflow extends Workflow
+{
+    private int $timerCount = 0;
+
+    #[QueryMethod]
+    public function getTimerCount(): int
+    {
+        return $this->timerCount;
+    }
+
+    #[QueryMethod]
+    public function getStatus(): array
+    {
+        return [
+            'timers' => $this->timerCount,
+            'completed' => $this->completed,
+        ];
+    }
+
+    public function execute()
+    {
+        for ($i = 0; $i < 5; $i++) {
+            $this->timerCount++;
+            yield timer(60);
+        }
+        return 'Done';
+    }
+}
+```
+
+## Querying Workflow State
+
+Query methods are called synchronously and return immediately:
+
+```php
+// Start a workflow
+$workflow = WorkflowStub::make(TimerWorkflow::class);
+$workflow->start();
+
+// Query the state at any time
+$count = $workflow->getTimerCount(); // Returns immediately with current count
+$status = $workflow->getStatus(); // Returns array with current state
+
+// Query again later
+sleep(120);
+$count = $workflow->getTimerCount(); // Returns updated count
+```
+
+## When to Use QueryMethod
+
+Use `QueryMethod` when you need to:
+
+- **Check workflow status** - Inspect progress without affecting execution
+- **Read computed state** - Get calculated values based on workflow properties
+- **Monitor progress** - Track workflow advancement for dashboards or UI
+- **Debug workflows** - Inspect internal state during development
+- **Conditional logic** - Make decisions based on workflow state
+
+## Query Methods are Read-Only
+
+Query methods should NOT modify workflow state. While you technically *can* modify state in a query method, the changes won't be persisted and will cause unpredictable behavior:
+
+```php
+// ❌ BAD - Don't modify state in queries
+#[QueryMethod]
+public function incrementCounter(): int
+{
+    $this->counter++; // Won't persist!
+    return $this->counter;
+}
+
+// ✅ GOOD - Only read state
+#[QueryMethod]
+public function getCounter(): int
+{
+    return $this->counter;
+}
+```
+
+## Complex Query Logic
+
+Query methods can perform complex calculations or aggregations:
+
+```php
+class AnalyticsWorkflow extends Workflow
+{
+    private array $events = [];
+
+    #[QueryMethod]
+    public function getEventCount(): int
+    {
+        return count($this->events);
+    }
+
+    #[QueryMethod]
+    public function getEventsByType(string $type): array
+    {
+        return array_filter(
+            $this->events,
+            fn($event) => $event['type'] === $type
+        );
+    }
+
+    #[QueryMethod]
+    public function getAnalytics(): array
+    {
+        return [
+            'total' => count($this->events),
+            'by_type' => array_count_values(
+                array_column($this->events, 'type')
+            ),
+            'average_duration' => $this->calculateAverageDuration(),
+        ];
+    }
+
+    private function calculateAverageDuration(): float
+    {
+        // Complex calculation logic
+        $durations = array_column($this->events, 'duration');
+        return count($durations) > 0 
+            ? array_sum($durations) / count($durations) 
+            : 0;
+    }
+}
+```
+
+## Detection and Caching
+
+WorkflowStub caches query method detection for performance:
+
+```php
+private static function isQueryMethod(string $class, string $method): bool
+{
+    if (!isset(self::$queryMethodCache[$class])) {
+        self::$queryMethodCache[$class] = [];
+        foreach ((new ReflectionClass($class))->getMethods() as $reflectionMethod) {
+            foreach ($reflectionMethod->getAttributes() as $attribute) {
+                if ($attribute->getName() === QueryMethod::class) {
+                    self::$queryMethodCache[$class][$reflectionMethod->getName()] = true;
+                    break;
+                }
+            }
+        }
+    }
+    return self::$queryMethodCache[$class][$method] ?? false;
+}
+```
+
+The first call to any query method on a workflow class scans all methods once, then caches the results (WorkflowStub.php:46, 352-366).
+
+## Differences from SignalMethod and UpdateMethod
+
+- **QueryMethod**: Reads state only, returns immediately, no execution triggered
+- **SignalMethod**: Modifies state, triggers execution, returns void
+- **UpdateMethod**: Reads current state AND queues execution if state was modified
+
+## Technical Details
+
+- **Target**: Methods only (`Attribute::TARGET_METHOD`)
+- **Return Type**: Can return any value (unlike SignalMethod which returns void)
+- **Execution**: Synchronous, no job dispatched
+- **State**: Workflow is instantiated fresh for each query
+- **Performance**: Cached attribute detection, direct method invocation
+
+## See Also
+
+- [SignalMethod](/api/attributes/signal-method) - Modify workflow state and trigger execution
+- [UpdateMethod](/api/attributes/update-method) - Read state and conditionally trigger execution
+- [WorkflowStub](/api/workflow-stub) - Learn about loading and interacting with workflows

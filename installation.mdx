@@ -1,0 +1,133 @@
+---
+title: Installation
+description: Install Durable Workflow in your Laravel application using Composer
+---
+
+Durable Workflow requires PHP 8.1 or higher and Laravel 9.0 or higher.
+
+## Requirements
+
+<CardGroup cols={2}>
+  <Card title="PHP" icon="php">
+    PHP 8.1 or higher
+  </Card>
+  <Card title="Laravel" icon="laravel">
+    Laravel 9.0, 10.0, 11.0, 12.0, or 13.0
+  </Card>
+  <Card title="Queue" icon="layer-group">
+    A configured Laravel queue driver (database, Redis, etc.)
+  </Card>
+  <Card title="Database" icon="database">
+    MySQL, PostgreSQL, SQLite, or SQL Server
+  </Card>
+</CardGroup>
+
+## Install via Composer
+
+<Steps>
+  <Step title="Install the package">
+    Install Durable Workflow using Composer:
+
+    ```bash
+    composer require laravel-workflow/laravel-workflow
+    ```
+
+    The package will be automatically discovered by Laravel.
+  </Step>
+
+  <Step title="Run migrations">
+    Publish and run the migrations to create the required database tables:
+
+    ```bash
+    php artisan migrate
+    ```
+
+    This creates the following tables:
+    - `workflows` - Stores workflow instances and their state
+    - `workflow_logs` - Records each activity execution for replay
+    - `workflow_signals` - Stores signals sent to workflows
+    - `workflow_timers` - Manages scheduled timers
+    - `workflow_exceptions` - Tracks exceptions that occur during execution
+    - `workflow_relationships` - Manages parent-child workflow relationships
+
+    <Note>
+      All tables use the default database connection unless you configure a different connection in the package configuration.
+    </Note>
+  </Step>
+
+  <Step title="Configure your queue">
+    Durable Workflow uses Laravel's queue system. Ensure you have a queue driver configured in `config/queue.php`.
+
+    For development, you can use the `database` driver:
+
+    ```php config/queue.php
+    'default' => env('QUEUE_CONNECTION', 'database'),
+    ```
+
+    For production, Redis is recommended:
+
+    ```php config/queue.php
+    'default' => env('QUEUE_CONNECTION', 'redis'),
+    ```
+
+    <Warning>
+      The `sync` driver is not recommended for workflows as it executes jobs synchronously and doesn't provide the durability guarantees needed for workflow execution.
+    </Warning>
+  </Step>
+
+  <Step title="Start your queue worker">
+    Start a queue worker to process workflows:
+
+    ```bash
+    php artisan queue:work
+    ```
+
+    For development with hot reloading:
+
+    ```bash
+    php artisan queue:work --tries=3
+    ```
+
+    <Tip>
+      Use a process manager like Supervisor in production to keep your queue workers running. See the [Laravel queue documentation](https://laravel.com/docs/queues#supervisor-configuration) for details.
+    </Tip>
+  </Step>
+</Steps>
+
+## Optional configuration
+
+You can publish the configuration file if you need to customize the package settings:
+
+```bash
+php artisan vendor:publish --provider="Workflow\Providers\WorkflowServiceProvider"
+```
+
+This creates a `config/workflows.php` file where you can configure:
+
+- Database connection
+- Queue connection and queue name
+- Serialization settings
+- Webhook authentication
+
+## Verify installation
+
+Create a test workflow to verify everything is working:
+
+```bash
+php artisan make:workflow TestWorkflow
+php artisan make:activity TestActivity
+```
+
+These commands generate:
+- `app/Workflows/TestWorkflow.php` - Your workflow class
+- `app/Activities/TestActivity.php` - Your activity class
+
+<Note>
+  If the `make:workflow` and `make:activity` commands are not available, ensure you've run `composer dump-autoload` after installing the package.
+</Note>
+
+## Next steps
+
+<Card title="Quick start guide" icon="rocket" href="/quickstart">
+  Learn how to create and run your first workflow
+</Card>

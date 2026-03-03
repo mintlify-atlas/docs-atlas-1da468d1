@@ -1,0 +1,269 @@
+---
+title: Signals
+description: Send asynchronous messages to running workflows to modify their behavior
+---
+
+Signals provide a way to send asynchronous messages to running workflows from external systems. They enable workflows to respond to external events and change their behavior dynamically.
+
+## Overview
+
+Signals are methods on your workflow class marked with the `#[SignalMethod]` attribute. They allow external code to communicate with a running workflow without waiting for a response.
+
+## Defining Signal Methods
+
+Mark methods with the `#[SignalMethod]` attribute to make them callable from outside the workflow:
+
+```php
+use Workflow\Workflow;
+use Workflow\SignalMethod;
+
+class OrderWorkflow extends Workflow
+{
+    private bool $canceled = false;
+    private string $status = 'pending';
+    
+    #[SignalMethod]
+    public function cancel(): void
+    {
+        $this->canceled = true;
+    }
+    
+    #[SignalMethod]
+    public function updateStatus(string $status): void
+    {
+        $this->status = $status;
+    }
+    
+    public function execute()
+    {
+        yield await(fn () => $this->canceled || $this->status === 'approved');
+        
+        if ($this->canceled) {
+            return 'Order canceled';
+        }
+        
+        return 'Order processed';
+    }
+}
+```
+
+<Note>
+Signal methods must return `void`. They cannot return values to the caller.
+</Note>
+
+## Sending Signals
+
+Send signals to a workflow using the workflow instance:
+
+```php
+use Workflow\WorkflowStub;
+
+// Get the workflow instance
+$workflow = WorkflowStub::find($workflowId);
+
+// Send a signal
+$workflow->cancel();
+
+// Send a signal with parameters
+$workflow->updateStatus('processing');
+```
+
+## Signal Characteristics
+
+<CardGroup cols={2}>
+  <Card title="Asynchronous" icon="bolt">
+    Signals return immediately without waiting for the workflow to process them
+  </Card>
+  <Card title="Persistent" icon="database">
+    Signals are queued and persisted, ensuring delivery even if the workflow is paused
+  </Card>
+  <Card title="Ordered" icon="list-ol">
+    Signals are processed in the order they are received
+  </Card>
+  <Card title="Void Return" icon="ban">
+    Signal methods cannot return values to the caller
+  </Card>
+</CardGroup>
+
+## Using Signals with Await
+
+A common pattern is to use signals to modify workflow state that is being awaited:
+
+```php
+use function Workflow\await;
+
+class ApprovalWorkflow extends Workflow
+{
+    private bool $approved = false;
+    private bool $rejected = false;
+    
+    #[SignalMethod]
+    public function approve(): void
+    {
+        $this->approved = true;
+    }
+    
+    #[SignalMethod]
+    public function reject(): void
+    {
+        $this->rejected = true;
+    }
+    
+    public function execute()
+    {
+        // Wait for either approval or rejection
+        yield await(fn () => $this->approved || $this->rejected);
+        
+        if ($this->approved) {
+            yield activity(ProcessApprovalActivity::class);
+            return 'approved';
+        }
+        
+        return 'rejected';
+    }
+}
+```
+
+## Multiple Signals
+
+Workflows can have multiple signal methods for different purposes:
+
+```php
+class OrderProcessingWorkflow extends Workflow
+{
+    private bool $canceled = false;
+    private bool $expedited = false;
+    private ?string $shippingAddress = null;
+    
+    #[SignalMethod]
+    public function cancel(): void
+    {
+        $this->canceled = true;
+    }
+    
+    #[SignalMethod]
+    public function expedite(): void
+    {
+        $this->expedited = true;
+    }
+    
+    #[SignalMethod]
+    public function updateShippingAddress(string $address): void
+    {
+        $this->shippingAddress = $address;
+    }
+    
+    public function execute($orderId)
+    {
+        // Process order with signal-based modifications
+        yield timer(3600); // 1 hour processing time
+        
+        if ($this->canceled) {
+            return 'canceled';
+        }
+        
+        $address = $this->shippingAddress ?? 'default address';
+        $priority = $this->expedited ? 'high' : 'normal';
+        
+        yield activity(ShipOrderActivity::class, $orderId, $address, $priority);
+        
+        return 'shipped';
+    }
+}
+```
+
+## Webhook Integration
+
+Signals can be exposed as webhooks for external systems to trigger:
+
+```php
+use Workflow\Webhook;
+
+class SubscriptionWorkflow extends Workflow
+{
+    private bool $paymentReceived = false;
+    
+    #[SignalMethod]
+    #[Webhook]
+    public function handlePayment(array $paymentData): void
+    {
+        $this->paymentReceived = true;
+    }
+    
+    public function execute()
+    {
+        // Wait for payment webhook
+        yield await(fn () => $this->paymentReceived);
+        
+        yield activity(ActivateSubscriptionActivity::class);
+        
+        return 'activated';
+    }
+}
+```
+
+<Info>
+When using the `#[Webhook]` attribute, the signal can be triggered via HTTP POST to the workflow's webhook URL.
+</Info>
+
+## Signal Replay Safety
+
+Signals are deterministic and replay-safe. The workflow execution history ensures that signals are processed consistently during replays:
+
+```php
+public function execute()
+{
+    $count = 0;
+    
+    // This will be replayed deterministically
+    yield await(function () use (&$count) {
+        // State modified by signals is preserved during replay
+        return $this->shouldContinue;
+    });
+    
+    return 'completed';
+}
+```
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Human Intervention" icon="user">
+    Allow humans to approve, reject, or modify workflow execution
+  </Card>
+  <Card title="External Events" icon="webhook">
+    React to external system events via webhooks
+  </Card>
+  <Card title="Cancellation" icon="xmark">
+    Provide a mechanism to cancel long-running workflows
+  </Card>
+  <Card title="Dynamic Updates" icon="arrows-rotate">
+    Update workflow parameters while execution is in progress
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Keep signal methods simple">
+    Signal methods should only update workflow state. Avoid complex logic or blocking operations.
+  </Accordion>
+  
+  <Accordion title="Use meaningful names">
+    Signal method names should clearly describe their purpose (e.g., `cancel()`, `approve()`, `updateAddress()`).
+  </Accordion>
+  
+  <Accordion title="Validate signal parameters">
+    Always validate parameters passed to signal methods to prevent invalid state.
+  </Accordion>
+  
+  <Accordion title="Document signal behavior">
+    Clearly document what each signal does and when it should be used.
+  </Accordion>
+</AccordionGroup>
+
+## Related Patterns
+
+- [Await Conditions](/patterns/await-conditions) - Wait for signal-modified state
+- [Queries and Updates](/patterns/queries-and-updates) - Read and modify workflow state
+- [Timers](/patterns/timers) - Combine signals with timeouts

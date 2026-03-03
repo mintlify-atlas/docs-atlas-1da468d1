@@ -1,0 +1,187 @@
+---
+title: SignalMethod
+description: Mark workflow methods that receive external signals during execution
+---
+
+## Overview
+
+The `SignalMethod` attribute marks public methods in your workflow that can receive external signals while the workflow is running. Signals allow external systems or users to send data or commands to an active workflow, enabling dynamic, event-driven behavior.
+
+## Basic Usage
+
+```php
+use Workflow\SignalMethod;
+use Workflow\Workflow;
+
+class OrderWorkflow extends Workflow
+{
+    private bool $canceled = false;
+
+    #[SignalMethod]
+    public function cancel(): void
+    {
+        $this->canceled = true;
+    }
+
+    public function execute()
+    {
+        yield await(fn() => $this->canceled);
+        return 'Order canceled';
+    }
+}
+```
+
+## How It Works
+
+When you call a signal method on a `WorkflowStub`, the framework:
+
+1. **Detects the attribute** - `WorkflowStub` uses reflection to identify methods marked with `SignalMethod` (WorkflowStub.php:335-349)
+2. **Creates a signal record** - The method name and arguments are serialized and stored in the database (WorkflowStub.php:68-72)
+3. **Dispatches the workflow** - A `Signal` job is queued to resume the workflow execution (WorkflowStub.php:81)
+4. **Replays the signal** - When the workflow replays, signals are processed in order
+
+```php
+private static function isSignalMethod(string $class, string $method): bool
+{
+    if (!isset(self::$signalMethodCache[$class])) {
+        self::$signalMethodCache[$class] = [];
+        foreach ((new ReflectionClass($class))->getMethods() as $reflectionMethod) {
+            foreach ($reflectionMethod->getAttributes() as $attribute) {
+                if ($attribute->getName() === SignalMethod::class) {
+                    self::$signalMethodCache[$class][$reflectionMethod->getName()] = true;
+                    break;
+                }
+            }
+        }
+    }
+    return self::$signalMethodCache[$class][$method] ?? false;
+}
+```
+
+## Multiple Signal Methods
+
+A workflow can have multiple signal methods to handle different types of events:
+
+```php
+class ApprovalWorkflow extends Workflow
+{
+    private bool $approved = false;
+    private bool $rejected = false;
+    private string $comment = '';
+
+    #[SignalMethod]
+    public function approve(): void
+    {
+        $this->approved = true;
+    }
+
+    #[SignalMethod]
+    public function reject(): void
+    {
+        $this->rejected = true;
+    }
+
+    #[SignalMethod]
+    public function addComment(string $comment): void
+    {
+        $this->comment = $comment;
+    }
+
+    public function execute()
+    {
+        yield await(fn() => $this->approved || $this->rejected);
+        
+        return $this->approved ? 'Approved' : 'Rejected';
+    }
+}
+```
+
+## Sending Signals
+
+Signals are sent by calling the method on a loaded workflow stub:
+
+```php
+// Start a workflow
+$workflow = WorkflowStub::make(OrderWorkflow::class);
+$workflow->start();
+
+// Send a signal later
+$workflow = WorkflowStub::load($workflowId);
+$workflow->cancel(); // Calls the #[SignalMethod] cancel() method
+```
+
+## Signal Methods with Parameters
+
+Signal methods can accept parameters, which are serialized and stored:
+
+```php
+class ChatBotWorkflow extends Workflow
+{
+    #[SignalMethod]
+    public function send(string $message): void
+    {
+        $this->inbox->receive($message);
+    }
+
+    public function execute()
+    {
+        yield await(fn() => $this->inbox->hasUnread());
+        $message = $this->inbox->nextUnread();
+        return "Received: {$message}";
+    }
+}
+
+// Usage
+$workflow->send('Hello!'); // Parameters are serialized
+```
+
+## When to Use SignalMethod
+
+Use `SignalMethod` when you need to:
+
+- **Cancel or pause workflows** - Allow external control over workflow execution
+- **Receive external events** - Process webhooks, user actions, or system events
+- **Implement approval flows** - Wait for user approvals or rejections
+- **Update workflow state** - Modify workflow properties during execution
+- **Handle user input** - Build interactive workflows that respond to user actions
+
+## Webhook Integration
+
+Combine `SignalMethod` with the `Webhook` attribute to expose signal methods as HTTP endpoints:
+
+```php
+use Workflow\SignalMethod;
+use Workflow\Webhook;
+
+class OrderWorkflow extends Workflow
+{
+    #[SignalMethod]
+    #[Webhook]
+    public function cancel(): void
+    {
+        $this->canceled = true;
+    }
+}
+```
+
+This automatically creates a route at `/webhooks/signal/order-workflow/{workflowId}/cancel` (Webhooks.php:93-116).
+
+## Differences from QueryMethod and UpdateMethod
+
+- **SignalMethod**: Modifies workflow state, triggers workflow execution, returns void
+- **QueryMethod**: Reads workflow state without modification, returns immediately
+- **UpdateMethod**: Combines query and signal - returns current state AND queues execution if state was modified
+
+## Technical Details
+
+- **Target**: Methods only (`Attribute::TARGET_METHOD`)
+- **Caching**: WorkflowStub caches attribute detection for performance (WorkflowStub.php:44)
+- **Serialization**: Arguments are serialized using `Serializer::serialize()` (WorkflowStub.php:71)
+- **Execution**: Signals are processed through the `Signal` job class
+- **Ordering**: Signals are processed in the order they were received
+
+## See Also
+
+- [QueryMethod](/api/attributes/query-method) - Read workflow state without modification
+- [UpdateMethod](/api/attributes/update-method) - Read state and optionally trigger execution
+- [Webhook](/api/attributes/webhook) - Expose workflow methods as HTTP endpoints

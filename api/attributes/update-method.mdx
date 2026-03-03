@@ -1,0 +1,259 @@
+---
+title: UpdateMethod
+description: Mark workflow methods that read state and conditionally trigger execution
+---
+
+## Overview
+
+The `UpdateMethod` attribute marks public methods that combine query and signal behavior. Update methods read the current workflow state and return a value immediately, then conditionally trigger workflow execution if the outbox was consumed during the read.
+
+## Basic Usage
+
+```php
+use Workflow\UpdateMethod;
+use Workflow\SignalMethod;
+use Workflow\Workflow;
+
+class ChatBotWorkflow extends Workflow
+{
+    #[SignalMethod]
+    public function send(string $message): void
+    {
+        $this->inbox->receive($message);
+    }
+
+    #[UpdateMethod]
+    public function receive(): string
+    {
+        return $this->outbox->nextUnsent();
+    }
+
+    public function execute()
+    {
+        while (true) {
+            // Ask a question
+            $this->outbox->send('How can I help you?');
+            
+            // Wait for user input
+            yield await(fn() => $this->inbox->hasUnread());
+            $message = $this->inbox->nextUnread();
+            
+            // Send response
+            $this->outbox->send("You said: {$message}");
+        }
+    }
+}
+```
+
+## How It Works
+
+When you call an update method on a `WorkflowStub`, the framework:
+
+1. **Detects the attribute** - `WorkflowStub` uses reflection to identify methods marked with `UpdateMethod` (WorkflowStub.php:318-333)
+2. **Loads the active workflow** - Retrieves the current workflow state (WorkflowStub.php:92)
+3. **Instantiates and queries** - Creates workflow instance and calls `query()` method (WorkflowStub.php:94-95)
+4. **Checks outbox consumption** - Determines if the query consumed any outbox messages (WorkflowStub.php:97)
+5. **Conditionally signals** - If outbox was consumed, creates a signal and dispatches the workflow (WorkflowStub.php:98-111)
+6. **Returns the result** - Returns the query result regardless of whether execution was triggered (WorkflowStub.php:114)
+
+```php
+if (self::isUpdateMethod($this->storedWorkflow->class, $method)) {
+    $activeWorkflow = $this->storedWorkflow->active();
+
+    $workflow = new $activeWorkflow->class($activeWorkflow, ...$activeWorkflow->workflowArguments());
+    $result = $workflow->query($method);
+
+    if ($workflow->outboxWasConsumed) {
+        $activeWorkflow->signals()
+            ->create([
+                'method' => $method,
+                'arguments' => Serializer::serialize($arguments),
+            ]);
+
+        $activeWorkflow->toWorkflow();
+
+        if (static::faked()) {
+            $this->resume();
+            return $result;
+        }
+
+        Signal::dispatch($activeWorkflow, self::connection(), self::queue());
+    }
+
+    return $result;
+}
+```
+
+## Update vs Query vs Signal
+
+`UpdateMethod` is a hybrid that combines aspects of both query and signal methods:
+
+| Feature | QueryMethod | UpdateMethod | SignalMethod |
+|---------|-------------|--------------|-------------|
+| Returns value | ✅ Yes | ✅ Yes | ❌ No (void) |
+| Triggers execution | ❌ Never | ⚠️ Conditionally | ✅ Always |
+| Modifies state | ❌ No | ⚠️ Maybe | ✅ Yes |
+| Creates signal record | ❌ No | ⚠️ If needed | ✅ Yes |
+| Use case | Read state | Read + consume | Write state |
+
+## Outbox Consumption Detection
+
+The key to update methods is the `outboxWasConsumed` property. This flag is set when the workflow's outbox is accessed during the query:
+
+```php
+class ChatBotWorkflow extends Workflow
+{
+    #[UpdateMethod]
+    public function receive(): string
+    {
+        // This call sets $this->outboxWasConsumed = true
+        return $this->outbox->nextUnsent();
+    }
+}
+```
+
+When `outboxWasConsumed` is true, the framework knows that:
+1. The query consumed a message from the outbox
+2. The workflow needs to be signaled to generate the next message
+3. A signal record should be created to replay this consumption
+
+## Practical Example: Request-Reply Pattern
+
+Update methods are perfect for request-reply patterns where you want to:
+1. Get the current response (query behavior)
+2. Signal the workflow to prepare the next response (signal behavior)
+
+```php
+class SurveyWorkflow extends Workflow
+{
+    private array $questions = [
+        'What is your name?',
+        'What is your email?',
+        'How satisfied are you?',
+    ];
+    private int $currentQuestion = 0;
+
+    #[SignalMethod]
+    public function submitAnswer(string $answer): void
+    {
+        $this->inbox->receive($answer);
+    }
+
+    #[UpdateMethod]
+    public function getNextQuestion(): ?string
+    {
+        // Returns current question AND marks it as sent
+        return $this->outbox->nextUnsent();
+    }
+
+    public function execute()
+    {
+        foreach ($this->questions as $question) {
+            // Queue the question
+            $this->outbox->send($question);
+            
+            // Wait for answer
+            yield await(fn() => $this->inbox->hasUnread());
+            $answer = $this->inbox->nextUnread();
+            
+            // Process answer...
+        }
+        
+        return 'Survey complete';
+    }
+}
+
+// Usage
+$workflow = WorkflowStub::make(SurveyWorkflow::class);
+$workflow->start();
+
+// Client polls for questions
+$question = $workflow->getNextQuestion(); // "What is your name?"
+// This returns the question AND signals the workflow to continue
+
+// Submit answer
+$workflow->submitAnswer('John');
+
+// Get next question
+$question = $workflow->getNextQuestion(); // "What is your email?"
+```
+
+## Signal Replay
+
+Update methods create signal records just like `SignalMethod`. This ensures that during workflow replay, the outbox consumption is replayed correctly:
+
+```php
+// First call
+$result = $workflow->receive(); // Creates signal record
+
+// During replay, the signal is processed in order
+// This ensures deterministic execution
+```
+
+## When to Use UpdateMethod
+
+Use `UpdateMethod` when you need to:
+
+- **Request-reply patterns** - Get a response and prepare the next one
+- **Polling endpoints** - Client polls for updates and triggers continuation
+- **Interactive workflows** - User requests data and workflow prepares next step
+- **Outbox pattern** - Consume messages from workflow outbox
+- **State machines** - Get current state and transition if consumed
+
+## Detection and Caching
+
+Like query and signal methods, update methods are detected via reflection and cached:
+
+```php
+public static function isUpdateMethod(string $class, string $method): bool
+{
+    if (!isset(self::$updateMethodCache[$class])) {
+        self::$updateMethodCache[$class] = [];
+        foreach ((new ReflectionClass($class))->getMethods() as $reflectionMethod) {
+            foreach ($reflectionMethod->getAttributes() as $attribute) {
+                if ($attribute->getName() === UpdateMethod::class) {
+                    self::$updateMethodCache[$class][$reflectionMethod->getName()] = true;
+                    break;
+                }
+            }
+        }
+    }
+    return self::$updateMethodCache[$class][$method] ?? false;
+}
+```
+
+The cache is stored in `WorkflowStub::$updateMethodCache` (WorkflowStub.php:48).
+
+## Testing Update Methods
+
+When testing, update methods work with `WorkflowStub::fake()`:
+
+```php
+WorkflowStub::fake();
+
+$workflow = WorkflowStub::make(ChatBotWorkflow::class);
+$workflow->start();
+
+// Send a message
+$workflow->send('Hello');
+
+// Receive response (triggers execution synchronously when faked)
+$response = $workflow->receive();
+
+assert($response === 'You said: Hello');
+```
+
+## Technical Details
+
+- **Target**: Methods only (`Attribute::TARGET_METHOD`)
+- **Return Type**: Can return any value (like QueryMethod)
+- **Execution**: Synchronous query + conditional async signal
+- **Caching**: Cached attribute detection for performance (WorkflowStub.php:48)
+- **Outbox**: Relies on `$workflow->outboxWasConsumed` flag
+- **Dispatch**: Uses `Signal::dispatch()` when outbox consumed (WorkflowStub.php:111)
+
+## See Also
+
+- [SignalMethod](/api/attributes/signal-method) - Modify workflow state and trigger execution
+- [QueryMethod](/api/attributes/query-method) - Read workflow state without modification
+- [WorkflowStub](/api/workflow-stub) - Learn about loading and interacting with workflows

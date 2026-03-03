@@ -1,0 +1,368 @@
+---
+title: Await Conditions
+description: Pause workflow execution until a condition becomes true
+---
+
+The await pattern allows workflows to pause execution until a specific condition evaluates to true. This is essential for workflows that need to wait for external events, signals, or state changes.
+
+## Overview
+
+The `await()` function pauses workflow execution and periodically checks a condition. When the condition returns `true`, the workflow resumes. This pattern is deterministic and replay-safe.
+
+## Basic Usage
+
+Use the `await()` helper function to wait for a condition:
+
+```php
+use Workflow\Workflow;
+use Workflow\SignalMethod;
+use function Workflow\await;
+
+class ApprovalWorkflow extends Workflow
+{
+    private bool $approved = false;
+    
+    #[SignalMethod]
+    public function approve(): void
+    {
+        $this->approved = true;
+    }
+    
+    public function execute()
+    {
+        // Wait until approved
+        yield await(fn () => $this->approved);
+        
+        yield activity(ProcessApprovalActivity::class);
+        
+        return 'approved';
+    }
+}
+```
+
+<Note>
+The condition must be a callable that returns a boolean value. It will be checked repeatedly until it returns `true`.
+</Note>
+
+## Awaiting Signals
+
+The most common pattern is awaiting state changes from signals:
+
+```php
+class OrderWorkflow extends Workflow
+{
+    private bool $canceled = false;
+    private bool $paymentReceived = false;
+    
+    #[SignalMethod]
+    public function cancel(): void
+    {
+        $this->canceled = true;
+    }
+    
+    #[SignalMethod]
+    public function confirmPayment(): void
+    {
+        $this->paymentReceived = true;
+    }
+    
+    public function execute($orderId)
+    {
+        // Wait for payment or cancellation
+        yield await(fn () => $this->paymentReceived || $this->canceled);
+        
+        if ($this->canceled) {
+            return 'Order canceled';
+        }
+        
+        yield activity(FulfillOrderActivity::class, $orderId);
+        
+        return 'Order completed';
+    }
+}
+```
+
+## Complex Conditions
+
+Conditions can be as complex as needed:
+
+```php
+class MultiStageWorkflow extends Workflow
+{
+    private int $approvals = 0;
+    private int $rejections = 0;
+    private array $data = [];
+    
+    #[SignalMethod]
+    public function addApproval(): void
+    {
+        $this->approvals++;
+    }
+    
+    #[SignalMethod]
+    public function addRejection(): void
+    {
+        $this->rejections++;
+    }
+    
+    #[SignalMethod]
+    public function updateData(array $data): void
+    {
+        $this->data = array_merge($this->data, $data);
+    }
+    
+    public function execute()
+    {
+        // Wait for either 3 approvals or 2 rejections
+        yield await(fn () => $this->approvals >= 3 || $this->rejections >= 2);
+        
+        if ($this->approvals >= 3) {
+            // Wait for required data
+            yield await(fn () => isset($this->data['customer_id'], $this->data['amount']));
+            
+            yield activity(ProcessApprovedActivity::class, $this->data);
+            return 'approved';
+        }
+        
+        return 'rejected';
+    }
+}
+```
+
+## Multiple Awaits
+
+You can use multiple await calls in sequence:
+
+```php
+class TripleApprovalWorkflow extends Workflow
+{
+    private bool $managerApproval = false;
+    private bool $financeApproval = false;
+    private bool $executiveApproval = false;
+    
+    #[SignalMethod]
+    public function approveAsManager(): void
+    {
+        $this->managerApproval = true;
+    }
+    
+    #[SignalMethod]
+    public function approveAsFinance(): void
+    {
+        $this->financeApproval = true;
+    }
+    
+    #[SignalMethod]
+    public function approveAsExecutive(): void
+    {
+        $this->executiveApproval = true;
+    }
+    
+    public function execute()
+    {
+        // First wait for manager approval
+        yield await(fn () => $this->managerApproval);
+        yield activity(NotifyFinanceActivity::class);
+        
+        // Then wait for finance approval
+        yield await(fn () => $this->financeApproval);
+        yield activity(NotifyExecutiveActivity::class);
+        
+        // Finally wait for executive approval
+        yield await(fn () => $this->executiveApproval);
+        
+        yield activity(ProcessFinalApprovalActivity::class);
+        
+        return 'fully_approved';
+    }
+}
+```
+
+## Await with Timeout
+
+For scenarios where you need a maximum wait time, use `awaitWithTimeout()`:
+
+```php
+use function Workflow\awaitWithTimeout;
+
+class TimedApprovalWorkflow extends Workflow
+{
+    private bool $approved = false;
+    
+    #[SignalMethod]
+    public function approve(): void
+    {
+        $this->approved = true;
+    }
+    
+    public function execute()
+    {
+        // Wait up to 48 hours for approval
+        $result = yield awaitWithTimeout(
+            '48 hours',
+            fn () => $this->approved
+        );
+        
+        if ($result) {
+            yield activity(ProcessApprovalActivity::class);
+            return 'approved';
+        }
+        
+        // Timeout occurred
+        yield activity(HandleTimeoutActivity::class);
+        return 'timeout';
+    }
+}
+```
+
+You can also use integer seconds or `CarbonInterval`:
+
+```php
+use Carbon\CarbonInterval;
+
+// Wait up to 2 hours (7200 seconds)
+yield awaitWithTimeout(7200, fn () => $this->ready);
+
+// Wait up to 1 week
+yield awaitWithTimeout(CarbonInterval::weeks(1), fn () => $this->completed);
+```
+
+<Info>
+If the timeout occurs before the condition becomes true, `awaitWithTimeout()` returns `false`.
+</Info>
+
+## Deterministic Conditions
+
+Condition functions must be deterministic - they should only access workflow state, not external state:
+
+<CodeGroup>
+```php Good - Deterministic
+yield await(fn () => $this->approved); // ✓ Uses workflow state
+
+yield await(fn () => $this->count >= 10); // ✓ Uses workflow state
+
+yield await(fn () => $this->status === 'ready'); // ✓ Uses workflow state
+```
+
+```php Bad - Non-deterministic
+yield await(fn () => time() > $deadline); // ✗ Uses system time
+
+yield await(fn () => User::count() > 100); // ✗ Queries database
+
+yield await(fn () => Cache::has('key')); // ✗ Checks external cache
+```
+</CodeGroup>
+
+<Warning>
+Non-deterministic conditions will cause replay errors. Always use workflow state modified by signals or activities.
+</Warning>
+
+## Pure Await Pattern
+
+You can use await without any activities for purely signal-driven workflows:
+
+```php
+class SignalDrivenWorkflow extends Workflow
+{
+    private bool $ready = false;
+    
+    #[SignalMethod]
+    public function markReady(): void
+    {
+        $this->ready = true;
+    }
+    
+    public function execute()
+    {
+        // Entire workflow is just waiting for a signal
+        yield await(fn () => $this->ready);
+        
+        return 'completed';
+    }
+}
+```
+
+## Combining Await with Activities
+
+Common pattern of performing work, then awaiting:
+
+```php
+class RequestApprovalWorkflow extends Workflow
+{
+    private bool $approved = false;
+    private bool $rejected = false;
+    
+    #[SignalMethod]
+    public function approve(): void
+    {
+        $this->approved = true;
+    }
+    
+    #[SignalMethod]
+    public function reject(): void
+    {
+        $this->rejected = true;
+    }
+    
+    public function execute($requestId)
+    {
+        // Send approval request
+        yield activity(SendApprovalRequestActivity::class, $requestId);
+        
+        // Wait for response
+        yield await(fn () => $this->approved || $this->rejected);
+        
+        // Process based on result
+        if ($this->approved) {
+            yield activity(ProcessApprovalActivity::class, $requestId);
+            return 'approved';
+        } else {
+            yield activity(ProcessRejectionActivity::class, $requestId);
+            return 'rejected';
+        }
+    }
+}
+```
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Human Approval" icon="user-check">
+    Wait for human intervention to approve or reject a workflow
+  </Card>
+  <Card title="External Events" icon="webhook">
+    Pause until an external system sends a webhook signal
+  </Card>
+  <Card title="State Accumulation" icon="layer-group">
+    Wait for multiple signals to be received before proceeding
+  </Card>
+  <Card title="Conditional Logic" icon="code-branch">
+    Implement complex branching based on accumulated state
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Keep conditions simple">
+    Condition functions should be lightweight and return quickly. Complex logic can slow down workflow polling.
+  </Accordion>
+  
+  <Accordion title="Use workflow state only">
+    Conditions must only access workflow instance variables. Never query databases or external systems.
+  </Accordion>
+  
+  <Accordion title="Add timeouts when needed">
+    Use `awaitWithTimeout()` for scenarios where indefinite waiting isn't acceptable.
+  </Accordion>
+  
+  <Accordion title="Document signal expectations">
+    Clearly document which signals are expected and what they do to help future maintainers.
+  </Accordion>
+</AccordionGroup>
+
+## Related Patterns
+
+- [Signals](/patterns/signals) - Send data to modify awaited state
+- [Timers](/patterns/timers) - Add timeouts to await conditions
+- [Queries and Updates](/patterns/queries-and-updates) - Inspect workflow state while awaiting

@@ -1,0 +1,100 @@
+---
+title: child()
+description: Execute a child workflow from a parent workflow
+---
+
+The `child()` function executes a child workflow within a parent workflow. Child workflows run independently and can be used to organize complex workflows into smaller, reusable components.
+
+## Signature
+
+```php
+function child($workflow, ...$arguments): PromiseInterface
+```
+
+## Parameters
+
+<ParamField path="workflow" type="string|class-string">
+  The child workflow class or name to execute
+</ParamField>
+
+<ParamField path="arguments" type="mixed">
+  Optional arguments to pass to the child workflow
+</ParamField>
+
+## Returns
+
+<ResponseField name="PromiseInterface" type="React\Promise\PromiseInterface">
+  A promise that resolves to the child workflow's result
+</ResponseField>
+
+## Usage
+
+```php
+use Workflow\Workflow;
+use function Workflow\{child, activity};
+
+class ParentWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // Execute a child workflow
+        $childResult = yield child(ChildWorkflow::class);
+        
+        // Execute an activity
+        $activityResult = yield activity(TestActivity::class);
+        
+        return 'workflow_' . $activityResult . '_' . $childResult;
+    }
+}
+```
+
+## Example with Arguments
+
+```php
+use Workflow\Workflow;
+use function Workflow\child;
+
+class OrderProcessingWorkflow extends Workflow
+{
+    public function execute($orderId)
+    {
+        // Execute child workflows with arguments
+        $paymentResult = yield child(PaymentWorkflow::class, $orderId);
+        $inventoryResult = yield child(InventoryWorkflow::class, $orderId);
+        $shippingResult = yield child(ShippingWorkflow::class, $orderId);
+        
+        return [
+            'payment' => $paymentResult,
+            'inventory' => $inventoryResult,
+            'shipping' => $shippingResult,
+        ];
+    }
+}
+```
+
+## Example with Multiple Children
+
+```php
+use Workflow\Workflow;
+use function Workflow\{child, all};
+
+class ParallelWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // Execute multiple child workflows in parallel
+        $results = yield all([
+            child(FirstChildWorkflow::class),
+            child(SecondChildWorkflow::class),
+            child(ThirdChildWorkflow::class),
+        ]);
+        
+        return $results;
+    }
+}
+```
+
+## Related
+
+- [activity()](/api/functions/activity) - Execute an activity
+- [continueAsNew()](/api/functions/continue-as-new) - Continue workflow with new execution

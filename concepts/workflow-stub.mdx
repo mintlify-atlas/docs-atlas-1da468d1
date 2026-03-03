@@ -1,0 +1,502 @@
+---
+title: WorkflowStub
+description: Learn how to interact with workflows using WorkflowStub for creation, loading, starting, and signaling
+---
+
+## Overview
+
+The `WorkflowStub` class is your primary interface for interacting with workflows. It provides methods to:
+
+- Create new workflow instances
+- Load existing workflows
+- Start workflow execution
+- Send signals to running workflows
+- Query workflow state
+- Check workflow status
+
+Think of `WorkflowStub` as the "handle" you use to control and communicate with workflows.
+
+## Creating Workflows
+
+Use `WorkflowStub::make()` to create a new workflow instance:
+
+```php
+use Workflow\WorkflowStub;
+
+$workflow = WorkflowStub::make(OrderProcessingWorkflow::class);
+```
+
+This creates a `StoredWorkflow` record in the database with a `created` status:
+
+```php src/WorkflowStub.php
+public static function make($class): static
+{
+    $storedWorkflow = config('workflows.stored_workflow_model', StoredWorkflow::class)::create([
+        'class' => $class,
+    ]);
+    
+    return new self($storedWorkflow);
+}
+```
+
+## Loading Existing Workflows
+
+Load a workflow by its ID using `WorkflowStub::load()`:
+
+```php
+$workflowId = 'abc-123';
+$workflow = WorkflowStub::load($workflowId);
+```
+
+You can also create a stub from a `StoredWorkflow` model:
+
+```php
+$storedWorkflow = StoredWorkflow::find($workflowId);
+$workflow = WorkflowStub::fromStoredWorkflow($storedWorkflow);
+```
+
+```php src/WorkflowStub.php
+public static function load($id)
+{
+    return static::fromStoredWorkflow(
+        config('workflows.stored_workflow_model', StoredWorkflow::class)::findOrFail($id)
+    );
+}
+
+public static function fromStoredWorkflow(StoredWorkflow $storedWorkflow): static
+{
+    return new self($storedWorkflow);
+}
+```
+
+## Starting Workflows
+
+Once you've created a workflow, start it with `start()`:
+
+```php
+$workflow = WorkflowStub::make(OrderProcessingWorkflow::class);
+$workflow->start($orderId, $customerId, $items);
+```
+
+The `start()` method:
+1. Serializes the arguments
+2. Transitions the workflow to "pending" status
+3. Dispatches the workflow job to the queue
+
+```php src/WorkflowStub.php
+public function start(...$arguments): void
+{
+    $fallbackOptions = $this->storedWorkflow->workflowOptions();
+    
+    $metadata = WorkflowMetadata::fromStartArguments($arguments, $fallbackOptions);
+    
+    $this->storedWorkflow->arguments = Serializer::serialize($metadata->toArray());
+    
+    $this->dispatch();
+}
+
+private function dispatch(): void
+{
+    if ($this->created()) {
+        WorkflowStarted::dispatch(
+            $this->storedWorkflow->id,
+            $this->storedWorkflow->class,
+            json_encode($this->storedWorkflow->workflowArguments()),
+            now()->format('Y-m-d\TH:i:s.u\Z')
+        );
+    }
+    
+    try {
+        $this->storedWorkflow->status->transitionTo(WorkflowPendingStatus::class);
+    } catch (TransitionNotFound $exception) {
+        // Already pending
+    }
+    
+    $dispatch = static::faked() ? 'dispatchSync' : 'dispatch';
+    
+    $this->storedWorkflow->class::$dispatch(
+        $this->storedWorkflow,
+        ...$this->storedWorkflow->workflowArguments()
+    );
+}
+```
+
+## Getting Workflow Information
+
+### Workflow ID
+
+Get the unique workflow identifier:
+
+```php
+$workflowId = $workflow->id();
+```
+
+### Workflow Status
+
+Check the current status of a workflow:
+
+```php
+// Get status class name
+$status = $workflow->status();
+// Returns: Workflow\States\WorkflowRunningStatus::class
+
+// Check specific states
+if ($workflow->completed()) {
+    // Workflow finished successfully
+}
+
+if ($workflow->failed()) {
+    // Workflow encountered an error
+}
+
+if ($workflow->running()) {
+    // Workflow is still executing
+}
+
+if ($workflow->created()) {
+    // Workflow hasn't started yet
+}
+```
+
+```php src/WorkflowStub.php
+public function completed(): bool
+{
+    return $this->status() === WorkflowCompletedStatus::class;
+}
+
+public function created(): bool
+{
+    return $this->status() === WorkflowCreatedStatus::class;
+}
+
+public function failed(): bool
+{
+    return $this->status() === WorkflowFailedStatus::class;
+}
+
+public function running(): bool
+{
+    return ! in_array($this->status(), [WorkflowCompletedStatus::class, WorkflowFailedStatus::class], true);
+}
+```
+
+### Workflow Output
+
+Retrieve the return value from a completed workflow:
+
+```php
+if ($workflow->completed()) {
+    $result = $workflow->output();
+}
+```
+
+```php src/WorkflowStub.php
+public function output()
+{
+    $activeWorkflow = $this->storedWorkflow->active();
+    
+    if ($activeWorkflow->output === null) {
+        return null;
+    }
+    
+    return Serializer::unserialize($activeWorkflow->output);
+}
+```
+
+### Workflow Logs
+
+Access execution logs for debugging:
+
+```php
+$logs = $workflow->logs();
+foreach ($logs as $log) {
+    echo "Index: {$log->index}, Result: {$log->result}";
+}
+```
+
+### Workflow Exceptions
+
+Retrieve exceptions that occurred during execution:
+
+```php
+$exceptions = $workflow->exceptions();
+foreach ($exceptions as $exception) {
+    echo "Error: {$exception->class} - {$exception->exception}";
+}
+```
+
+## Refreshing Workflow State
+
+Reload the workflow's state from the database:
+
+```php
+$workflow->fresh();
+```
+
+```php src/WorkflowStub.php
+public function fresh(): static
+{
+    $this->storedWorkflow->refresh();
+    
+    return $this;
+}
+```
+
+## Signaling Workflows
+
+Send signals to running workflows using the magic `__call` method:
+
+```php
+class OrderWorkflow extends Workflow
+{
+    #[SignalMethod]
+    public function cancelOrder()
+    {
+        $this->cancelled = true;
+    }
+    
+    public function execute($orderId)
+    {
+        // Workflow logic
+    }
+}
+
+// Send signal from outside
+$workflow = WorkflowStub::load($workflowId);
+$workflow->cancelOrder();
+```
+
+When you call a signal method:
+
+```php src/WorkflowStub.php
+public function __call($method, $arguments)
+{
+    if (self::isSignalMethod($this->storedWorkflow->class, $method)) {
+        $activeWorkflow = $this->storedWorkflow->active();
+        
+        $activeWorkflow->signals()->create([
+            'method' => $method,
+            'arguments' => Serializer::serialize($arguments),
+        ]);
+        
+        $activeWorkflow->toWorkflow();
+        
+        if (static::faked()) {
+            $this->resume();
+            return;
+        }
+        
+        return Signal::dispatch($activeWorkflow, self::connection(), self::queue());
+    }
+    // ...
+}
+```
+
+The signal is persisted and the workflow is dispatched to process it.
+
+## Querying Workflows
+
+Query methods let you read workflow state without modifying it:
+
+```php
+class OrderWorkflow extends Workflow
+{
+    private $orderStatus = 'pending';
+    
+    #[QueryMethod]
+    public function getOrderStatus()
+    {
+        return $this->orderStatus;
+    }
+    
+    public function execute($orderId)
+    {
+        // Workflow logic
+    }
+}
+
+// Query from outside
+$workflow = WorkflowStub::load($workflowId);
+$status = $workflow->getOrderStatus();
+```
+
+Query methods replay the workflow to get the current state:
+
+```php src/WorkflowStub.php
+if (self::isQueryMethod($this->storedWorkflow->class, $method)) {
+    $activeWorkflow = $this->storedWorkflow->active();
+    
+    return (new $activeWorkflow->class($activeWorkflow, ...$activeWorkflow->workflowArguments()))
+        ->query($method);
+}
+```
+
+## Update Methods
+
+Update methods combine query and signal behavior—they return a value immediately and can modify state:
+
+```php
+class OrderWorkflow extends Workflow
+{
+    private $itemCount = 0;
+    
+    #[UpdateMethod]
+    public function addItem($item)
+    {
+        $this->itemCount++;
+        return $this->itemCount;
+    }
+    
+    public function execute($orderId)
+    {
+        // Workflow logic
+    }
+}
+
+// Call update method
+$workflow = WorkflowStub::load($workflowId);
+$newCount = $workflow->addItem(['sku' => '12345']);
+echo "New item count: $newCount";
+```
+
+```php src/WorkflowStub.php
+if (self::isUpdateMethod($this->storedWorkflow->class, $method)) {
+    $activeWorkflow = $this->storedWorkflow->active();
+    
+    $workflow = new $activeWorkflow->class($activeWorkflow, ...$activeWorkflow->workflowArguments());
+    $result = $workflow->query($method);
+    
+    if ($workflow->outboxWasConsumed) {
+        $activeWorkflow->signals()->create([
+            'method' => $method,
+            'arguments' => Serializer::serialize($arguments),
+        ]);
+        
+        $activeWorkflow->toWorkflow();
+        
+        if (static::faked()) {
+            $this->resume();
+            return $result;
+        }
+        
+        Signal::dispatch($activeWorkflow, self::connection(), self::queue());
+    }
+    
+    return $result;
+}
+```
+
+## Resuming Workflows
+
+Manually resume a waiting workflow:
+
+```php
+$workflow->resume();
+```
+
+```php src/WorkflowStub.php
+public function resume(): void
+{
+    $this->fresh()->dispatch();
+}
+```
+
+## Child Workflows
+
+Start a workflow as a child of another workflow:
+
+```php src/WorkflowStub.php
+public function startAsChild(StoredWorkflow $parentWorkflow, int $index, $now, ...$arguments): void
+{
+    $this->storedWorkflow->parents()->detach();
+    
+    $this->storedWorkflow->parents()->attach($parentWorkflow, [
+        'parent_index' => $index,
+        'parent_now' => $now,
+    ]);
+    
+    $this->start(...$arguments);
+}
+```
+
+Child workflows inherit timing and context from their parent.
+
+## Workflow Context
+
+Access execution context from within a workflow:
+
+```php
+$context = WorkflowStub::getContext();
+// Contains: storedWorkflow, index, now, replaying
+
+$now = WorkflowStub::now();
+// Get deterministic timestamp
+```
+
+```php src/WorkflowStub.php
+public static function getContext(): \stdClass
+{
+    return self::$context;
+}
+
+public static function now()
+{
+    return self::getContext()->now;
+}
+```
+
+## Method Detection
+
+WorkflowStub caches method type detection for performance:
+
+```php src/WorkflowStub.php
+private static function isSignalMethod(string $class, string $method): bool
+{
+    if (! isset(self::$signalMethodCache[$class])) {
+        self::$signalMethodCache[$class] = [];
+        foreach ((new ReflectionClass($class))->getMethods() as $reflectionMethod) {
+            foreach ($reflectionMethod->getAttributes() as $attribute) {
+                if ($attribute->getName() === SignalMethod::class) {
+                    self::$signalMethodCache[$class][$reflectionMethod->getName()] = true;
+                    break;
+                }
+            }
+        }
+    }
+    
+    return self::$signalMethodCache[$class][$method] ?? false;
+}
+```
+
+Similar methods exist for `isQueryMethod` and `isUpdateMethod`.
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Always check status before querying output" icon="circle-check">
+    Only call `output()` on completed workflows to avoid getting null values.
+  </Card>
+  
+  <Card title="Use signals for external events" icon="signal">
+    When external systems need to notify a workflow, use signal methods.
+  </Card>
+  
+  <Card title="Use queries for read-only access" icon="magnifying-glass">
+    Query methods are safe and don't modify workflow state.
+  </Card>
+  
+  <Card title="Refresh before checking status" icon="arrows-rotate">
+    Call `fresh()` before checking status if the workflow may have changed.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="State Management" icon="database" href="/concepts/state-management">
+    Learn about workflow states and transitions
+  </Card>
+  <Card title="Durability" icon="shield" href="/concepts/durability">
+    Understand how workflows persist and replay
+  </Card>
+</CardGroup>

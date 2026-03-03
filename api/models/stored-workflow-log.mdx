@@ -1,0 +1,238 @@
+---
+title: StoredWorkflowLog
+description: Model for storing activity execution history within workflows
+---
+
+The `StoredWorkflowLog` model records each activity execution within a workflow. Each log entry represents a single activity invocation with its result and timestamp.
+
+## Database Table
+
+**Table:** `workflow_logs`
+
+## Model Attributes
+
+<ResponseField name="id" type="integer" required>
+  Primary key for the log entry
+</ResponseField>
+
+<ResponseField name="stored_workflow_id" type="integer" required>
+  Foreign key reference to the parent workflow in the `workflows` table
+</ResponseField>
+
+<ResponseField name="index" type="integer" required>
+  Sequential index of this activity within the workflow execution. Combined with `stored_workflow_id`, this is unique.
+</ResponseField>
+
+<ResponseField name="now" type="timestamp" required>
+  The workflow's logical timestamp when this activity was executed (microsecond precision)
+</ResponseField>
+
+<ResponseField name="class" type="string" required>
+  Fully qualified class name of the activity that was executed (e.g., `App\Activities\SendEmail`)
+</ResponseField>
+
+<ResponseField name="result" type="string" nullable>
+  Serialized result/output returned by the activity execution
+</ResponseField>
+
+<ResponseField name="created_at" type="timestamp" required>
+  Real-world timestamp when this log entry was created (microsecond precision)
+</ResponseField>
+
+## Special Behavior
+
+### No updated_at Timestamp
+
+This model does not use the `updated_at` timestamp:
+
+```php
+public const UPDATED_AT = null;
+```
+
+Log entries are immutable once created and are never updated.
+
+## Relationships
+
+### workflow()
+
+While not explicitly defined in the model, you can access the parent workflow via:
+
+```php
+$log = StoredWorkflowLog::find($id);
+$workflow = $log->workflow; // Implicit belongsTo relationship
+```
+
+This is an implicit `BelongsTo` relationship to [StoredWorkflow](/api/models/stored-workflow).
+
+## Querying Activity Logs
+
+### Get all logs for a workflow
+
+```php
+use Workflow\Models\StoredWorkflow;
+
+$workflow = StoredWorkflow::find($workflowId);
+$logs = $workflow->logs; // Ordered by ID
+
+foreach ($logs as $log) {
+    echo "[{$log->index}] {$log->class} executed at {$log->now}\n";
+    if ($log->result) {
+        $result = unserialize($log->result);
+        echo "Result: " . json_encode($result) . "\n";
+    }
+}
+```
+
+### Find a specific log by index
+
+```php
+$workflow = StoredWorkflow::find($workflowId);
+$log = $workflow->findLogByIndex(3);
+
+if ($log) {
+    echo "Activity {$log->class} at index {$log->index}\n";
+}
+```
+
+### Get logs for a specific activity class
+
+```php
+use Workflow\Models\StoredWorkflowLog;
+
+$emailLogs = StoredWorkflowLog::where('stored_workflow_id', $workflowId)
+    ->where('class', 'App\\Activities\\SendEmail')
+    ->orderBy('index')
+    ->get();
+
+foreach ($emailLogs as $log) {
+    echo "Email sent at index {$log->index}\n";
+}
+```
+
+### Get recent activity executions across all workflows
+
+```php
+$recentLogs = StoredWorkflowLog::orderBy('created_at', 'desc')
+    ->limit(100)
+    ->get();
+
+foreach ($recentLogs as $log) {
+    echo "[Workflow {$log->stored_workflow_id}] {$log->class}\n";
+}
+```
+
+### Count activities executed by workflow
+
+```php
+use Illuminate\Support\Facades\DB;
+
+$activityCounts = StoredWorkflowLog::select('stored_workflow_id', DB::raw('count(*) as activity_count'))
+    ->groupBy('stored_workflow_id')
+    ->orderBy('activity_count', 'desc')
+    ->get();
+```
+
+### Get logs with their parent workflows
+
+```php
+$logs = StoredWorkflowLog::with('workflow')
+    ->where('class', 'App\\Activities\\SendEmail')
+    ->get();
+
+foreach ($logs as $log) {
+    echo "Workflow {$log->workflow->class} executed {$log->class}\n";
+}
+```
+
+## Understanding the Index
+
+The `index` field is crucial for workflow execution:
+
+- Each activity invocation gets a unique index within its workflow
+- Indexes are sequential: 0, 1, 2, 3...
+- During replay, the workflow uses these indexes to determine which activities have already been executed
+- The combination of `stored_workflow_id` and `index` is unique (enforced by database constraint)
+
+```php
+// Check if an activity at a specific index has been executed
+$workflow = StoredWorkflow::find($workflowId);
+
+if ($workflow->hasLogByIndex(5)) {
+    $log = $workflow->findLogByIndex(5);
+    echo "Activity at index 5 was {$log->class}\n";
+} else {
+    echo "Activity at index 5 has not been executed yet\n";
+}
+```
+
+## Understanding Workflow Time
+
+The `now` field represents the workflow's logical time, not real-world time:
+
+```php
+$log = StoredWorkflowLog::find($id);
+
+echo "Real-world time: {$log->created_at}\n";
+echo "Workflow time: {$log->now}\n";
+```
+
+- `created_at` - When the log was physically written to the database
+- `now` - The workflow's internal logical timestamp
+
+During workflow replay, the `now` value remains consistent, while `created_at` would change if the log were recreated.
+
+## Configuration
+
+The model class can be customized in `config/workflows.php`:
+
+```php
+'stored_workflow_log_model' => Workflow\Models\StoredWorkflowLog::class,
+```
+
+## Usage in Workflow Execution
+
+Logs are automatically created by the workflow engine:
+
+```php
+// In your workflow class
+public function execute($input)
+{
+    // This activity execution will create a log entry
+    $result = yield Workflow::newActivity(SendEmailActivity::class, $input);
+    
+    // The log will contain:
+    // - index: sequential number (e.g., 0)
+    // - class: 'App\Activities\SendEmailActivity'
+    // - result: serialized $result
+    // - now: workflow's current logical time
+    
+    return $result;
+}
+```
+
+## Debugging with Logs
+
+Logs are invaluable for debugging workflow execution:
+
+```php
+use Workflow\Models\StoredWorkflow;
+
+$workflow = StoredWorkflow::with('logs')->find($workflowId);
+
+echo "Workflow {$workflow->id} executed {$workflow->logs->count()} activities:\n";
+
+foreach ($workflow->logs as $log) {
+    echo sprintf(
+        "  [%d] %s at %s\n",
+        $log->index,
+        $log->class,
+        $log->now->format('Y-m-d H:i:s.u')
+    );
+}
+```
+
+## See Also
+
+- [StoredWorkflow](/api/models/stored-workflow) - Parent workflow model
+- [StoredWorkflowException](/api/models/stored-workflow-exception) - Exception tracking
+- [Activities](/concepts/activities) - Understanding activity execution

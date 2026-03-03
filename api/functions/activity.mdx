@@ -1,0 +1,78 @@
+---
+title: activity()
+description: Execute an activity function within a workflow
+---
+
+The `activity()` function executes an activity within a workflow. Activities are functions that perform side effects or interact with external systems.
+
+## Signature
+
+```php
+function activity($activity, ...$arguments): PromiseInterface
+```
+
+## Parameters
+
+<ParamField path="activity" type="string|class-string">
+  The activity class or name to execute
+</ParamField>
+
+<ParamField path="arguments" type="mixed">
+  Optional arguments to pass to the activity
+</ParamField>
+
+## Returns
+
+<ResponseField name="PromiseInterface" type="React\Promise\PromiseInterface">
+  A promise that resolves to the activity's result
+</ResponseField>
+
+## Usage
+
+```php
+use Workflow\Workflow;
+use function Workflow\activity;
+
+class MyWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // Execute an activity
+        $result = yield activity(SendEmailActivity::class);
+        
+        // Execute an activity with arguments
+        $result = yield activity(ProcessPaymentActivity::class, $userId, $amount);
+        
+        return $result;
+    }
+}
+```
+
+## Example with Multiple Activities
+
+```php
+use Workflow\Workflow;
+use function Workflow\{activity, all};
+
+class OrderWorkflow extends Workflow
+{
+    public function execute($orderId)
+    {
+        // Execute activities sequentially
+        $payment = yield activity(ProcessPaymentActivity::class, $orderId);
+        $shipping = yield activity(CreateShipmentActivity::class, $orderId);
+        $notification = yield activity(SendNotificationActivity::class, $orderId);
+        
+        return [
+            'payment' => $payment,
+            'shipping' => $shipping,
+            'notification' => $notification,
+        ];
+    }
+}
+```
+
+## Related
+
+- [child()](/api/functions/child) - Execute a child workflow
+- [async()](/api/activity-stub#async) - Execute asynchronous code

@@ -1,0 +1,348 @@
+---
+title: "Workflow Logging"
+description: "Access and query workflow execution history programmatically"
+---
+
+Durable Workflow maintains a comprehensive log of all workflow executions, activities, and state transitions. This logging system enables you to query execution history, debug issues, and analyze workflow behavior.
+
+## The StoredWorkflowLog Model
+
+Workflow execution logs are stored in the `workflow_logs` table and can be accessed through the `StoredWorkflowLog` Eloquent model.
+
+**Class:** `Workflow\Models\StoredWorkflowLog`
+
+**Table:** `workflow_logs`
+
+### Model Properties
+
+The model uses a custom date format for microsecond precision:
+
+```php
+protected $dateFormat = 'Y-m-d H:i:s.u';
+```
+
+The model only tracks creation time (`created_at`) and does not update after creation:
+
+```php
+const UPDATED_AT = null;
+```
+
+### Available Casts
+
+- `now` (datetime) - Timestamp of when the log entry was created
+
+## Database Schema
+
+While the exact schema depends on your migration, typical log entries include:
+
+- `id` - Unique log entry identifier
+- `workflow_id` - The workflow instance this log belongs to
+- `type` - Type of log entry (workflow_started, activity_completed, etc.)
+- `message` - Log message or event description
+- `data` - JSON field containing event data
+- `now` - Timestamp with microsecond precision
+- `created_at` - Record creation timestamp
+
+## Querying Workflow Logs
+
+### Retrieve All Logs for a Workflow
+
+```php
+use Workflow\Models\StoredWorkflowLog;
+
+$logs = StoredWorkflowLog::where('workflow_id', $workflowId)
+    ->orderBy('now')
+    ->get();
+
+foreach ($logs as $log) {
+    echo "{$log->now}: {$log->type} - {$log->message}\n";
+}
+```
+
+### Find Failed Workflows
+
+```php
+$failedWorkflows = StoredWorkflowLog::where('type', 'workflow_failed')
+    ->where('created_at', '>', now()->subHours(24))
+    ->get();
+
+foreach ($failedWorkflows as $log) {
+    echo "Workflow {$log->workflow_id} failed at {$log->now}\n";
+}
+```
+
+### Track Activity Execution
+
+```php
+$activityLogs = StoredWorkflowLog::where('workflow_id', $workflowId)
+    ->whereIn('type', ['activity_started', 'activity_completed', 'activity_failed'])
+    ->orderBy('now')
+    ->get();
+
+foreach ($activityLogs as $log) {
+    $data = json_decode($log->data, true);
+    echo "{$data['class']} - {$log->type}\n";
+}
+```
+
+### Calculate Workflow Duration
+
+```php
+use Carbon\Carbon;
+
+$firstLog = StoredWorkflowLog::where('workflow_id', $workflowId)
+    ->where('type', 'workflow_started')
+    ->first();
+
+$lastLog = StoredWorkflowLog::where('workflow_id', $workflowId)
+    ->whereIn('type', ['workflow_completed', 'workflow_failed'])
+    ->first();
+
+if ($firstLog && $lastLog) {
+    $duration = Carbon::parse($firstLog->now)
+        ->diffInMilliseconds(Carbon::parse($lastLog->now));
+    
+    echo "Workflow took {$duration}ms to complete\n";
+}
+```
+
+## Building an Execution Timeline
+
+Create a complete timeline view of a workflow execution:
+
+```php
+use Workflow\Models\StoredWorkflowLog;
+use Illuminate\Support\Collection;
+
+class WorkflowTimeline
+{
+    public static function for(int|string $workflowId): Collection
+    {
+        return StoredWorkflowLog::where('workflow_id', $workflowId)
+            ->orderBy('now')
+            ->get()
+            ->map(function ($log) {
+                $data = json_decode($log->data, true) ?? [];
+                
+                return [
+                    'timestamp' => $log->now,
+                    'type' => $log->type,
+                    'message' => $log->message,
+                    'data' => $data,
+                ];
+            });
+    }
+}
+
+// Usage
+$timeline = WorkflowTimeline::for($workflowId);
+
+foreach ($timeline as $event) {
+    echo "[{$event['timestamp']}] {$event['type']}: {$event['message']}\n";
+}
+```
+
+## Performance Monitoring
+
+### Activity Performance Analysis
+
+```php
+use Workflow\Models\StoredWorkflowLog;
+use Illuminate\Support\Facades\DB;
+
+class ActivityPerformanceMonitor
+{
+    public static function analyzeActivity(string $activityClass): array
+    {
+        $starts = StoredWorkflowLog::where('type', 'activity_started')
+            ->where('data->class', $activityClass)
+            ->get()
+            ->keyBy('data.activity_id');
+            
+        $completions = StoredWorkflowLog::where('type', 'activity_completed')
+            ->where('data->class', $activityClass)
+            ->get()
+            ->keyBy('data.activity_id');
+        
+        $durations = [];
+        
+        foreach ($starts as $activityId => $start) {
+            if (isset($completions[$activityId])) {
+                $durations[] = Carbon::parse($start->now)
+                    ->diffInMilliseconds(Carbon::parse($completions[$activityId]->now));
+            }
+        }
+        
+        return [
+            'count' => count($durations),
+            'average' => array_sum($durations) / count($durations),
+            'min' => min($durations),
+            'max' => max($durations),
+        ];
+    }
+}
+
+// Usage
+$stats = ActivityPerformanceMonitor::analyzeActivity(SendEmailActivity::class);
+echo "Average execution time: {$stats['average']}ms\n";
+```
+
+### Identify Slow Workflows
+
+```php
+use Workflow\Models\StoredWorkflowLog;
+
+class SlowWorkflowDetector
+{
+    public static function findSlow(int $thresholdMs = 5000): Collection
+    {
+        return DB::table('workflow_logs as starts')
+            ->join('workflow_logs as ends', 'starts.workflow_id', '=', 'ends.workflow_id')
+            ->where('starts.type', 'workflow_started')
+            ->whereIn('ends.type', ['workflow_completed', 'workflow_failed'])
+            ->select(
+                'starts.workflow_id',
+                'starts.now as started_at',
+                'ends.now as ended_at',
+                DB::raw('TIMESTAMPDIFF(MICROSECOND, starts.now, ends.now) / 1000 as duration_ms')
+            )
+            ->having('duration_ms', '>', $thresholdMs)
+            ->orderByDesc('duration_ms')
+            ->get();
+    }
+}
+
+// Usage
+$slowWorkflows = SlowWorkflowDetector::findSlow(10000); // Workflows taking > 10 seconds
+foreach ($slowWorkflows as $workflow) {
+    echo "Workflow {$workflow->workflow_id} took {$workflow->duration_ms}ms\n";
+}
+```
+
+## Log Retention and Cleanup
+
+Manage log storage by implementing a cleanup strategy:
+
+```php
+use Workflow\Models\StoredWorkflowLog;
+
+class CleanupOldLogs
+{
+    public static function deleteOlderThan(int $days = 30): int
+    {
+        return StoredWorkflowLog::where('created_at', '<', now()->subDays($days))
+            ->delete();
+    }
+    
+    public static function archiveCompleted(int $days = 7): void
+    {
+        $cutoffDate = now()->subDays($days);
+        
+        // Find completed workflows older than cutoff
+        $completedWorkflowIds = StoredWorkflowLog::whereIn('type', ['workflow_completed'])
+            ->where('created_at', '<', $cutoffDate)
+            ->pluck('workflow_id')
+            ->unique();
+        
+        foreach ($completedWorkflowIds as $workflowId) {
+            // Archive to separate storage
+            $logs = StoredWorkflowLog::where('workflow_id', $workflowId)->get();
+            Storage::put(
+                "workflow-archives/{$workflowId}.json",
+                $logs->toJson()
+            );
+            
+            // Delete from active logs
+            StoredWorkflowLog::where('workflow_id', $workflowId)->delete();
+        }
+    }
+}
+```
+
+Schedule cleanup in your console kernel:
+
+```php
+protected function schedule(Schedule $schedule)
+{
+    $schedule->call(function () {
+        CleanupOldLogs::deleteOlderThan(30);
+    })->daily();
+}
+```
+
+## Debugging with Logs
+
+### Trace a Specific Workflow Execution
+
+```php
+use Workflow\Models\StoredWorkflowLog;
+
+class WorkflowDebugger
+{
+    public static function trace(int|string $workflowId): void
+    {
+        $logs = StoredWorkflowLog::where('workflow_id', $workflowId)
+            ->orderBy('now')
+            ->get();
+        
+        echo "\n=== Workflow {$workflowId} Execution Trace ===\n\n";
+        
+        foreach ($logs as $log) {
+            $data = json_decode($log->data, true) ?? [];
+            $timestamp = Carbon::parse($log->now)->format('Y-m-d H:i:s.u');
+            
+            echo "[{$timestamp}] {$log->type}\n";
+            
+            if (!empty($data)) {
+                foreach ($data as $key => $value) {
+                    $displayValue = is_array($value) ? json_encode($value) : $value;
+                    echo "  {$key}: {$displayValue}\n";
+                }
+            }
+            
+            echo "\n";
+        }
+    }
+}
+
+// Usage
+WorkflowDebugger::trace($workflowId);
+```
+
+## Integration with Monitoring Tools
+
+Export logs to external monitoring services:
+
+```php
+use Workflow\Models\StoredWorkflowLog;
+use Illuminate\Support\Facades\Http;
+
+class LogExporter
+{
+    public static function exportToDatadog(int|string $workflowId): void
+    {
+        $logs = StoredWorkflowLog::where('workflow_id', $workflowId)
+            ->orderBy('now')
+            ->get();
+        
+        foreach ($logs as $log) {
+            Http::post('https://http-intake.logs.datadoghq.com/v1/input', [
+                'ddsource' => 'durable-workflow',
+                'service' => 'workflow-engine',
+                'hostname' => gethostname(),
+                'timestamp' => Carbon::parse($log->now)->timestamp,
+                'message' => $log->message,
+                'workflow_id' => $workflowId,
+                'type' => $log->type,
+                'data' => json_decode($log->data, true),
+            ]);
+        }
+    }
+}
+```
+
+## Next Steps
+
+- Explore the [Waterline UI](/monitoring/waterline) for visual log browsing
+- Set up [event listeners](/monitoring/events) for real-time monitoring
+- Learn about [workflow error handling](/advanced/error-handling) to reduce failures

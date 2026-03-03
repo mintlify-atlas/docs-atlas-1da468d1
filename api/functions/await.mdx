@@ -1,0 +1,158 @@
+---
+title: await() & awaitWithTimeout()
+description: Wait for a condition to become true in a workflow
+---
+
+The `await()` and `awaitWithTimeout()` functions pause workflow execution until a specified condition becomes true. These are commonly used to wait for signals or state changes.
+
+## await()
+
+Pauses workflow execution until the provided condition returns true.
+
+### Signature
+
+```php
+function await($condition): PromiseInterface
+```
+
+### Parameters
+
+<ParamField path="condition" type="callable">
+  A callable that returns a boolean. The workflow will pause until this returns true
+</ParamField>
+
+### Returns
+
+<ResponseField name="PromiseInterface" type="React\Promise\PromiseInterface">
+  A promise that resolves when the condition becomes true
+</ResponseField>
+
+### Usage
+
+```php
+use Workflow\Workflow;
+use Workflow\SignalMethod;
+use function Workflow\await;
+
+class ApprovalWorkflow extends Workflow
+{
+    private bool $approved = false;
+    
+    #[SignalMethod]
+    public function approve(): void
+    {
+        $this->approved = true;
+    }
+    
+    public function execute()
+    {
+        // Wait until approved
+        yield await(fn () => $this->approved);
+        
+        return 'approved';
+    }
+}
+```
+
+## awaitWithTimeout()
+
+Pauses workflow execution until the provided condition returns true or the timeout is reached.
+
+### Signature
+
+```php
+function awaitWithTimeout(int|string|CarbonInterval $seconds, $condition): PromiseInterface
+```
+
+### Parameters
+
+<ParamField path="seconds" type="int|string|CarbonInterval">
+  The timeout duration in seconds, a string duration (e.g., "5 minutes"), or a CarbonInterval
+</ParamField>
+
+<ParamField path="condition" type="callable">
+  A callable that returns a boolean. The workflow will pause until this returns true or timeout is reached
+</ParamField>
+
+### Returns
+
+<ResponseField name="PromiseInterface" type="React\Promise\PromiseInterface">
+  A promise that resolves when the condition becomes true or the timeout expires
+</ResponseField>
+
+### Usage
+
+```php
+use Workflow\Workflow;
+use Workflow\SignalMethod;
+use function Workflow\awaitWithTimeout;
+
+class TimedApprovalWorkflow extends Workflow
+{
+    private bool $approved = false;
+    
+    #[SignalMethod]
+    public function approve(): void
+    {
+        $this->approved = true;
+    }
+    
+    public function execute()
+    {
+        // Wait up to 60 seconds for approval
+        yield awaitWithTimeout(60, fn () => $this->approved);
+        
+        if ($this->approved) {
+            return 'approved';
+        }
+        
+        return 'timeout';
+    }
+}
+```
+
+## Example with Multiple Conditions
+
+```php
+use Workflow\Workflow;
+use Workflow\SignalMethod;
+use function Workflow\await;
+
+class MultiConditionWorkflow extends Workflow
+{
+    private bool $conditionA = false;
+    private bool $conditionB = false;
+    private bool $canceled = false;
+    
+    #[SignalMethod]
+    public function setConditionA(): void
+    {
+        $this->conditionA = true;
+    }
+    
+    #[SignalMethod]
+    public function setConditionB(): void
+    {
+        $this->conditionB = true;
+    }
+    
+    #[SignalMethod]
+    public function cancel(): void
+    {
+        $this->canceled = true;
+    }
+    
+    public function execute()
+    {
+        // Wait for either both conditions or cancellation
+        yield await(fn () => ($this->conditionA && $this->conditionB) || $this->canceled);
+        
+        return $this->canceled ? 'canceled' : 'completed';
+    }
+}
+```
+
+## Related
+
+- [timer()](/api/functions/timer) - Wait for a specific duration
+- [SignalMethod](/api/attributes/signal-method) - Define signal methods for workflows

@@ -1,0 +1,324 @@
+---
+title: Workflow
+description: Base class for defining durable workflows in Durable Workflow
+---
+
+## Overview
+
+The `Workflow` class is the base class for all durable workflows. It implements Laravel queue contracts and provides the core execution engine for workflow logic.
+
+## Traits Used
+
+- `Dispatchable` - Enables dispatching workflows to queues
+- `InteractsWithQueue` - Provides queue interaction methods
+- `Queueable` - Makes workflows queueable
+- `RouteDependencyResolverTrait` - Resolves method dependencies
+- `Sagas` - Provides saga pattern support
+- `SerializesModels` - Handles model serialization
+
+## Properties
+
+<ParamField path="key" type="?string" default="null">
+  Unique identifier for the workflow instance
+</ParamField>
+
+<ParamField path="tries" type="int" default="0">
+  Number of times the workflow job should be attempted
+</ParamField>
+
+<ParamField path="maxExceptions" type="int" default="0">
+  Maximum number of exceptions allowed before failing
+</ParamField>
+
+<ParamField path="timeout" type="int" default="0">
+  Maximum execution time in seconds
+</ParamField>
+
+<ParamField path="replaying" type="bool" default="false">
+  Indicates whether the workflow is currently replaying from history
+</ParamField>
+
+<ParamField path="inbox" type="Inbox">
+  Message inbox for receiving signals
+</ParamField>
+
+<ParamField path="outbox" type="Outbox">
+  Message outbox for sending signals and activities
+</ParamField>
+
+## Constructor
+
+```php
+public function __construct(
+    public StoredWorkflow $storedWorkflow,
+    ...$arguments
+)
+```
+
+Creates a new workflow instance with the stored workflow model and execution arguments.
+
+<ParamField path="storedWorkflow" type="StoredWorkflow" required>
+  The persisted workflow state from the database
+</ParamField>
+
+<ParamField path="arguments" type="mixed" required>
+  Variable arguments passed to the workflow execute method
+</ParamField>
+
+### Example
+
+```php
+use Workflow\Workflow;
+use Workflow\Models\StoredWorkflow;
+
+class OrderWorkflow extends Workflow
+{
+    public function execute(Order $order)
+    {
+        // Workflow logic here
+    }
+}
+
+// Constructor is called internally by the framework
+$workflow = new OrderWorkflow($storedWorkflow, $order);
+```
+
+## Methods
+
+### uniqueId()
+
+```php
+public function uniqueId()
+```
+
+Returns the unique identifier for this workflow instance, used for queue deduplication.
+
+**Returns:** The stored workflow ID
+
+### Example
+
+```php
+$id = $workflow->uniqueId();
+// Returns: "01234567-89ab-cdef-0123-456789abcdef"
+```
+
+### query()
+
+```php
+public function query($method)
+```
+
+Executes a query method on the workflow without side effects. Query methods can read workflow state but cannot modify it.
+
+<ParamField path="method" type="string" required>
+  The name of the query method to invoke
+</ParamField>
+
+**Returns:** The result of the query method
+
+### Example
+
+```php
+use Workflow\QueryMethod;
+
+class OrderWorkflow extends Workflow
+{
+    private int $totalAmount = 0;
+
+    #[QueryMethod]
+    public function getTotal(): int
+    {
+        return $this->totalAmount;
+    }
+
+    public function execute(Order $order)
+    {
+        $this->totalAmount = $order->amount;
+        // ...
+    }
+}
+
+// Query the workflow state
+$total = $workflow->query('getTotal');
+```
+
+### child()
+
+```php
+public function child(): ?ChildWorkflowHandle
+```
+
+Returns the most recent child workflow spawned by this workflow.
+
+**Returns:** A `ChildWorkflowHandle` instance or `null` if no children exist
+
+### Example
+
+```php
+public function execute()
+{
+    yield ActivityStub::make(ProcessPayment::class);
+    
+    $childHandle = $this->child();
+    if ($childHandle) {
+        $result = $childHandle->output();
+    }
+}
+```
+
+### children()
+
+```php
+public function children(): array
+```
+
+Returns all child workflows spawned by this workflow.
+
+**Returns:** Array of `ChildWorkflowHandle` instances
+
+### Example
+
+```php
+public function execute()
+{
+    yield ChildWorkflowStub::make(SubWorkflow::class, $arg1);
+    yield ChildWorkflowStub::make(SubWorkflow::class, $arg2);
+    
+    $children = $this->children();
+    // Returns: [ChildWorkflowHandle, ChildWorkflowHandle]
+}
+```
+
+### middleware()
+
+```php
+public function middleware()
+```
+
+Defines queue middleware for the workflow. By default, applies `WithoutOverlappingMiddleware` to prevent concurrent execution.
+
+**Returns:** Array of middleware instances
+
+### Example
+
+```php
+public function middleware()
+{
+    return [
+        new RateLimited('workflows'),
+        new WithoutOverlapping($this->storedWorkflow->id),
+    ];
+}
+```
+
+### failed()
+
+```php
+public function failed(Throwable $throwable): void
+```
+
+Called when the workflow job fails. Transitions the workflow to failed state.
+
+<ParamField path="throwable" type="Throwable" required>
+  The exception that caused the failure
+</ParamField>
+
+### Example
+
+```php
+public function failed(Throwable $throwable): void
+{
+    parent::failed($throwable);
+    
+    // Custom failure handling
+    Log::error('Workflow failed', [
+        'workflow_id' => $this->storedWorkflow->id,
+        'error' => $throwable->getMessage(),
+    ]);
+}
+```
+
+### handle()
+
+```php
+public function handle(): void
+```
+
+Main workflow execution handler. This method is called by the queue worker and orchestrates workflow execution, including replay logic and state management.
+
+**Note:** This method is called internally by the framework. You should not call it directly.
+
+### Example
+
+```php
+// Framework calls handle() internally
+// You define the execute() method instead:
+
+class MyWorkflow extends Workflow
+{
+    public function execute(Order $order)
+    {
+        // Your workflow logic
+        $result = yield ActivityStub::make(ProcessPayment::class, $order);
+        return $result;
+    }
+}
+```
+
+## Complete Example
+
+```php
+use Workflow\Workflow;
+use Workflow\ActivityStub;
+use Workflow\QueryMethod;
+use Workflow\SignalMethod;
+
+class OrderFulfillmentWorkflow extends Workflow
+{
+    private string $status = 'pending';
+    private array $items = [];
+
+    public function execute(Order $order)
+    {
+        $this->status = 'processing';
+        $this->items = $order->items;
+
+        // Process payment
+        $payment = yield ActivityStub::make(
+            ProcessPaymentActivity::class,
+            $order->amount
+        );
+
+        // Ship order
+        $shipment = yield ActivityStub::make(
+            ShipOrderActivity::class,
+            $order->id
+        );
+
+        $this->status = 'completed';
+        
+        return [
+            'payment' => $payment,
+            'shipment' => $shipment,
+        ];
+    }
+
+    #[QueryMethod]
+    public function getStatus(): string
+    {
+        return $this->status;
+    }
+
+    #[QueryMethod]
+    public function getItems(): array
+    {
+        return $this->items;
+    }
+
+    #[SignalMethod]
+    public function cancelOrder(): void
+    {
+        $this->status = 'cancelled';
+    }
+}
+```

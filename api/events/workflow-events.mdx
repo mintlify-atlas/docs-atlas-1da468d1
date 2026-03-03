@@ -1,0 +1,245 @@
+---
+title: Workflow Events
+description: Events dispatched during workflow lifecycle
+---
+
+# Workflow Events
+
+Durable Workflow dispatches events at key points in a workflow's lifecycle. You can listen to these events to implement custom logging, monitoring, or side effects.
+
+## WorkflowStarted
+
+Dispatched when a new workflow instance begins execution.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `workflowId` | `int\|string` | Unique identifier for the workflow instance |
+| `class` | `string` | Fully qualified class name of the workflow |
+| `arguments` | `string` | Serialized workflow input arguments |
+| `timestamp` | `string` | ISO 8601 timestamp when the workflow started |
+
+### Example Usage
+
+```php
+use Workflow\Events\WorkflowStarted;
+use Illuminate\Support\Facades\Event;
+
+Event::listen(WorkflowStarted::class, function (WorkflowStarted $event) {
+    logger()->info('Workflow started', [
+        'workflow_id' => $event->workflowId,
+        'class' => $event->class,
+        'started_at' => $event->timestamp,
+    ]);
+});
+```
+
+### Listening in EventServiceProvider
+
+```php
+protected $listen = [
+    \Workflow\Events\WorkflowStarted::class => [
+        \App\Listeners\LogWorkflowStarted::class,
+        \App\Listeners\NotifyWorkflowStarted::class,
+    ],
+];
+```
+
+---
+
+## WorkflowCompleted
+
+Dispatched when a workflow successfully completes execution.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `workflowId` | `int\|string` | Unique identifier for the workflow instance |
+| `output` | `string` | Serialized workflow output/result |
+| `timestamp` | `string` | ISO 8601 timestamp when the workflow completed |
+
+### Example Usage
+
+```php
+use Workflow\Events\WorkflowCompleted;
+use Illuminate\Support\Facades\Event;
+
+Event::listen(WorkflowCompleted::class, function (WorkflowCompleted $event) {
+    logger()->info('Workflow completed', [
+        'workflow_id' => $event->workflowId,
+        'output' => $event->output,
+        'completed_at' => $event->timestamp,
+    ]);
+    
+    // Send notification or trigger downstream processes
+    ProcessWorkflowResult::dispatch($event->workflowId, $event->output);
+});
+```
+
+### Listening in EventServiceProvider
+
+```php
+protected $listen = [
+    \Workflow\Events\WorkflowCompleted::class => [
+        \App\Listeners\LogWorkflowCompleted::class,
+        \App\Listeners\SendCompletionNotification::class,
+    ],
+];
+```
+
+---
+
+## WorkflowFailed
+
+Dispatched when a workflow fails due to an unhandled exception or error.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `workflowId` | `int\|string` | Unique identifier for the workflow instance |
+| `output` | `string` | Serialized error information or exception details |
+| `timestamp` | `string` | ISO 8601 timestamp when the workflow failed |
+
+### Example Usage
+
+```php
+use Workflow\Events\WorkflowFailed;
+use Illuminate\Support\Facades\Event;
+
+Event::listen(WorkflowFailed::class, function (WorkflowFailed $event) {
+    logger()->error('Workflow failed', [
+        'workflow_id' => $event->workflowId,
+        'error' => $event->output,
+        'failed_at' => $event->timestamp,
+    ]);
+    
+    // Alert monitoring system
+    report(new WorkflowFailedException($event->workflowId, $event->output));
+});
+```
+
+### Listening in EventServiceProvider
+
+```php
+protected $listen = [
+    \Workflow\Events\WorkflowFailed::class => [
+        \App\Listeners\LogWorkflowFailure::class,
+        \App\Listeners\AlertOnWorkflowFailure::class,
+    ],
+];
+```
+
+---
+
+## StateChanged
+
+Dispatched when a workflow state transitions from one state to another. This is particularly useful for workflows using the state machine pattern.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `initialState` | `?State` | The previous state (null if transitioning from no state) |
+| `finalState` | `?State` | The new state (null if transitioning to no state) |
+| `model` | `Model` | The Eloquent model that owns the state |
+| `field` | `?string` | The field name on the model that stores the state |
+
+### Example Usage
+
+```php
+use Workflow\Events\StateChanged;
+use Illuminate\Support\Facades\Event;
+
+Event::listen(StateChanged::class, function (StateChanged $event) {
+    logger()->info('State changed', [
+        'model' => get_class($event->model),
+        'model_id' => $event->model->id,
+        'field' => $event->field,
+        'from' => $event->initialState?->name,
+        'to' => $event->finalState?->name,
+    ]);
+    
+    // Trigger actions based on state transitions
+    if ($event->finalState?->name === 'completed') {
+        SendCompletionEmail::dispatch($event->model);
+    }
+});
+```
+
+### Listening in EventServiceProvider
+
+```php
+protected $listen = [
+    \Workflow\Events\StateChanged::class => [
+        \App\Listeners\LogStateTransition::class,
+        \App\Listeners\HandleStateTransition::class,
+    ],
+];
+```
+
+---
+
+## Global Event Listening
+
+You can listen to all workflow events using a wildcard listener:
+
+```php
+use Illuminate\Support\Facades\Event;
+
+Event::listen('Workflow\\Events\\*', function (string $eventName, array $data) {
+    logger()->debug('Workflow event fired', [
+        'event' => $eventName,
+        'data' => $data,
+    ]);
+});
+```
+
+## Event Subscribers
+
+For more complex event handling, create an event subscriber:
+
+```php
+namespace App\Listeners;
+
+use Workflow\Events\WorkflowStarted;
+use Workflow\Events\WorkflowCompleted;
+use Workflow\Events\WorkflowFailed;
+
+class WorkflowEventSubscriber
+{
+    public function handleWorkflowStarted(WorkflowStarted $event): void
+    {
+        // Handle workflow start
+    }
+    
+    public function handleWorkflowCompleted(WorkflowCompleted $event): void
+    {
+        // Handle workflow completion
+    }
+    
+    public function handleWorkflowFailed(WorkflowFailed $event): void
+    {
+        // Handle workflow failure
+    }
+    
+    public function subscribe($events): array
+    {
+        return [
+            WorkflowStarted::class => 'handleWorkflowStarted',
+            WorkflowCompleted::class => 'handleWorkflowCompleted',
+            WorkflowFailed::class => 'handleWorkflowFailed',
+        ];
+    }
+}
+```
+
+Register the subscriber in `EventServiceProvider`:
+
+```php
+protected $subscribe = [
+    \App\Listeners\WorkflowEventSubscriber::class,
+];
+```

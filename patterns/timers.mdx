@@ -1,0 +1,345 @@
+---
+title: Timers
+description: Add durable delays and timeouts to your workflow executions
+---
+
+Timers provide a way to pause workflow execution for a specified duration. Unlike regular `sleep()` calls, workflow timers are durable and survive process restarts.
+
+## Overview
+
+Workflow timers are deterministic and persisted. When a workflow is paused for a timer, the workflow execution state is saved, and the workflow resumes automatically after the specified duration.
+
+## Basic Usage
+
+Use the `timer()` helper function to create a durable delay:
+
+```php
+use Workflow\Workflow;
+use function Workflow\timer;
+
+class NotificationWorkflow extends Workflow
+{
+    public function execute($userId)
+    {
+        // Send immediate notification
+        yield activity(SendEmailActivity::class, $userId, 'Welcome!');
+        
+        // Wait 24 hours
+        yield timer(86400);
+        
+        // Send follow-up notification
+        yield activity(SendEmailActivity::class, $userId, 'How are you enjoying our service?');
+        
+        return 'notifications_sent';
+    }
+}
+```
+
+## Time Units
+
+Timers accept time in multiple formats:
+
+### Seconds (Integer)
+
+```php
+// Wait 60 seconds
+yield timer(60);
+```
+
+### String Format
+
+```php
+// Wait 2 hours and 30 minutes
+yield timer('2 hours 30 minutes');
+
+// Wait 3 days
+yield timer('3 days');
+```
+
+### CarbonInterval
+
+```php
+use Carbon\CarbonInterval;
+
+// Wait 1 week
+yield timer(CarbonInterval::weeks(1));
+
+// Wait 2 hours
+yield timer(CarbonInterval::hours(2));
+```
+
+## Helper Functions
+
+The package provides convenient time-based helper functions:
+
+```php
+use function Workflow\{seconds, minutes, hours, days, weeks, months, years};
+
+class ReminderWorkflow extends Workflow
+{
+    public function execute($taskId)
+    {
+        // Wait 30 seconds
+        yield seconds(30);
+        
+        // Wait 5 minutes
+        yield minutes(5);
+        
+        // Wait 2 hours
+        yield hours(2);
+        
+        // Wait 1 day
+        yield days(1);
+        
+        // Wait 1 week
+        yield weeks(1);
+        
+        // Wait 3 months
+        yield months(3);
+        
+        // Wait 1 year
+        yield years(1);
+        
+        yield activity(SendReminderActivity::class, $taskId);
+        
+        return 'reminder_sent';
+    }
+}
+```
+
+<Note>
+All time helper functions return a `PromiseInterface` that resolves when the timer completes.
+</Note>
+
+## Multiple Timers
+
+You can use multiple timers in sequence:
+
+```php
+public function execute($orderId)
+{
+    yield activity(ConfirmOrderActivity::class, $orderId);
+    
+    // Wait 1 hour
+    yield hours(1);
+    yield activity(SendShippingNotificationActivity::class, $orderId);
+    
+    // Wait 24 hours
+    yield days(1);
+    yield activity(SendDeliveryConfirmationActivity::class, $orderId);
+    
+    // Wait 7 days
+    yield weeks(1);
+    yield activity(SendReviewRequestActivity::class, $orderId);
+    
+    return 'completed';
+}
+```
+
+## Zero and Negative Durations
+
+Timers with zero or negative durations resolve immediately:
+
+```php
+// Resolves immediately
+yield timer(0);
+
+// Also resolves immediately
+yield timer(-10);
+```
+
+## Timers with Queries
+
+Combine timers with query methods to monitor workflow state during delays:
+
+```php
+use Workflow\QueryMethod;
+
+class WaitingWorkflow extends Workflow
+{
+    private string $status = 'initialized';
+    
+    #[QueryMethod]
+    public function getStatus(): string
+    {
+        return $this->status;
+    }
+    
+    public function execute($duration)
+    {
+        $this->status = 'waiting';
+        
+        yield timer($duration);
+        
+        $this->status = 'completed';
+        
+        return 'workflow';
+    }
+}
+```
+
+Query the workflow while it's waiting:
+
+```php
+$workflow = WorkflowStub::make(WaitingWorkflow::class);
+$workflow->start(10);
+
+sleep(1);
+
+// Query while timer is active
+$status = $workflow->getStatus(); // 'waiting'
+
+while ($workflow->running());
+
+$status = $workflow->getStatus(); // 'completed'
+```
+
+## Timeout Pattern
+
+Combine timers with await conditions to implement timeouts:
+
+```php
+use function Workflow\{await, timer};
+
+class ApprovalWorkflow extends Workflow
+{
+    private bool $approved = false;
+    
+    #[SignalMethod]
+    public function approve(): void
+    {
+        $this->approved = true;
+    }
+    
+    public function execute()
+    {
+        // Wait for approval or timeout after 48 hours
+        $timeout = timer(hours(48));
+        $approval = await(fn () => $this->approved);
+        
+        // Race between timeout and approval
+        $result = yield race([$timeout, $approval]);
+        
+        if ($this->approved) {
+            return 'approved';
+        }
+        
+        // Timeout occurred
+        yield activity(NotifyTimeoutActivity::class);
+        return 'timeout';
+    }
+}
+```
+
+<Info>
+For a built-in timeout implementation, use the `awaitWithTimeout()` helper function.
+</Info>
+
+## Queue Driver Limitations
+
+Some queue drivers have maximum delay limits:
+
+### SQS Driver
+
+Amazon SQS has a maximum delay of 15 minutes (900 seconds). For longer durations, the workflow automatically breaks the delay into multiple timer dispatches:
+
+```php
+// On SQS, this will be broken into multiple 15-minute timers
+yield hours(2); // Automatically handled
+```
+
+## Retry Delays
+
+Timers are commonly used for retry logic with exponential backoff:
+
+```php
+public function execute($apiEndpoint)
+{
+    $maxRetries = 5;
+    $retryCount = 0;
+    
+    while ($retryCount < $maxRetries) {
+        try {
+            $result = yield activity(CallApiActivity::class, $apiEndpoint);
+            return $result;
+        } catch (\Exception $e) {
+            $retryCount++;
+            
+            if ($retryCount >= $maxRetries) {
+                throw $e;
+            }
+            
+            // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+            $delay = pow(2, $retryCount);
+            yield timer($delay);
+        }
+    }
+}
+```
+
+## Scheduled Workflows
+
+Timers enable scheduled workflow patterns:
+
+```php
+class DailyReportWorkflow extends Workflow
+{
+    public function execute()
+    {
+        while (true) {
+            // Generate report
+            yield activity(GenerateReportActivity::class);
+            
+            // Wait 24 hours before next report
+            yield days(1);
+        }
+    }
+}
+```
+
+<Warning>
+For infinitely looping workflows, consider using [Continue as New](/patterns/continue-as-new) to prevent history from growing unbounded.
+</Warning>
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Delayed Actions" icon="clock">
+    Execute activities after a specific delay (send follow-up email after 24 hours)
+  </Card>
+  <Card title="Retry Logic" icon="arrow-rotate-right">
+    Implement exponential backoff between retry attempts
+  </Card>
+  <Card title="Scheduled Tasks" icon="calendar-days">
+    Run periodic tasks at fixed intervals
+  </Card>
+  <Card title="Timeouts" icon="hourglass-end">
+    Set maximum wait times for external events or approvals
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use helper functions">
+    Prefer `hours(2)` over `timer(7200)` for better readability.
+  </Accordion>
+  
+  <Accordion title="Consider queue limits">
+    Be aware of queue driver limitations when using very long delays.
+  </Accordion>
+  
+  <Accordion title="Don't use sleep()">
+    Never use PHP's `sleep()` in workflows - it's not durable and will break replay.
+  </Accordion>
+  
+  <Accordion title="Combine with await">
+    Use `awaitWithTimeout()` when you need both a condition check and a timeout.
+  </Accordion>
+</AccordionGroup>
+
+## Related Patterns
+
+- [Await Conditions](/patterns/await-conditions) - Wait for state changes with timeouts
+- [Continue as New](/patterns/continue-as-new) - Handle long-running scheduled workflows
+- [Signals](/patterns/signals) - Cancel or modify timers via external signals

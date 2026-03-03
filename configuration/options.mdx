@@ -1,0 +1,332 @@
+---
+title: Configuration Options
+description: Complete reference for all Durable Workflow configuration options
+---
+
+This page provides a comprehensive reference of all configuration options available in the `config/workflows.php` file.
+
+## Publishing Configuration
+
+Publish the configuration file to customize it:
+
+```bash
+php artisan vendor:publish --provider="Workflow\Providers\WorkflowServiceProvider"
+```
+
+This creates `config/workflows.php` in your Laravel application.
+
+## Configuration Options
+
+### Workflows Folder
+
+<ParamField path="workflows_folder" type="string" default="Workflows">
+  The directory within your application where workflow classes are stored. Relative to the app directory.
+  
+  ```php
+  'workflows_folder' => 'Workflows',
+  ```
+</ParamField>
+
+### Database Models
+
+Customize the Eloquent models used for persisting workflow data.
+
+<ParamField path="stored_workflow_model" type="string" default="Workflow\Models\StoredWorkflow::class">
+  The model class for workflow instances.
+  
+  ```php
+  'stored_workflow_model' => Workflow\Models\StoredWorkflow::class,
+  ```
+</ParamField>
+
+<ParamField path="stored_workflow_exception_model" type="string" default="Workflow\Models\StoredWorkflowException::class">
+  The model class for workflow exceptions.
+  
+  ```php
+  'stored_workflow_exception_model' => Workflow\Models\StoredWorkflowException::class,
+  ```
+</ParamField>
+
+<ParamField path="stored_workflow_log_model" type="string" default="Workflow\Models\StoredWorkflowLog::class">
+  The model class for activity execution logs.
+  
+  ```php
+  'stored_workflow_log_model' => Workflow\Models\StoredWorkflowLog::class,
+  ```
+</ParamField>
+
+<ParamField path="stored_workflow_signal_model" type="string" default="Workflow\Models\StoredWorkflowSignal::class">
+  The model class for workflow signals.
+  
+  ```php
+  'stored_workflow_signal_model' => Workflow\Models\StoredWorkflowSignal::class,
+  ```
+</ParamField>
+
+<ParamField path="stored_workflow_timer_model" type="string" default="Workflow\Models\StoredWorkflowTimer::class">
+  The model class for workflow timers.
+  
+  ```php
+  'stored_workflow_timer_model' => Workflow\Models\StoredWorkflowTimer::class,
+  ```
+</ParamField>
+
+### Database Tables
+
+<ParamField path="workflow_relationships_table" type="string" default="workflow_relationships">
+  The database table name for storing parent-child workflow relationships.
+  
+  ```php
+  'workflow_relationships_table' => 'workflow_relationships',
+  ```
+</ParamField>
+
+### Serialization
+
+<ParamField path="serializer" type="string" default="Workflow\Serializers\Y::class">
+  The serializer class used to serialize and deserialize workflow data. The Y serializer provides efficient serialization with support for complex PHP types.
+  
+  ```php
+  'serializer' => Workflow\Serializers\Y::class,
+  ```
+</ParamField>
+
+### Data Retention
+
+<ParamField path="prune_age" type="string" default="1 month">
+  How long to keep completed workflow data before it can be pruned. Uses PHP's strtotime compatible format.
+  
+  ```php
+  'prune_age' => '1 month',
+  ```
+  
+  **Examples:**
+  - `'7 days'`
+  - `'2 weeks'`
+  - `'3 months'`
+  - `'1 year'`
+</ParamField>
+
+## Webhook Configuration
+
+Configure webhook endpoints for external integrations.
+
+### Webhook Route
+
+<ParamField path="webhooks_route" type="string" default="webhooks">
+  The base route path for webhook endpoints. Can be overridden with the `WORKFLOW_WEBHOOKS_ROUTE` environment variable.
+  
+  ```php
+  'webhooks_route' => env('WORKFLOW_WEBHOOKS_ROUTE', 'webhooks'),
+  ```
+  
+  **Environment Variable:**
+  ```env
+  WORKFLOW_WEBHOOKS_ROUTE=webhooks
+  ```
+</ParamField>
+
+### Webhook Authentication
+
+<ParamField path="webhook_auth.method" type="string" default="none">
+  The authentication method for webhook requests. Can be overridden with the `WORKFLOW_WEBHOOKS_AUTH_METHOD` environment variable.
+  
+  **Options:**
+  - `none` - No authentication (not recommended for production)
+  - `signature` - HMAC signature verification
+  - `token` - Bearer token authentication
+  - `custom` - Custom authentication class
+  
+  ```php
+  'webhook_auth' => [
+      'method' => env('WORKFLOW_WEBHOOKS_AUTH_METHOD', 'none'),
+  ],
+  ```
+  
+  **Environment Variable:**
+  ```env
+  WORKFLOW_WEBHOOKS_AUTH_METHOD=signature
+  ```
+</ParamField>
+
+### Signature Authentication
+
+Used when `webhook_auth.method` is set to `signature`.
+
+<ParamField path="webhook_auth.signature.header" type="string" default="X-Signature">
+  The HTTP header containing the webhook signature. Can be overridden with the `WORKFLOW_WEBHOOKS_SIGNATURE_HEADER` environment variable.
+  
+  ```php
+  'webhook_auth' => [
+      'signature' => [
+          'header' => env('WORKFLOW_WEBHOOKS_SIGNATURE_HEADER', 'X-Signature'),
+      ],
+  ],
+  ```
+  
+  **Environment Variable:**
+  ```env
+  WORKFLOW_WEBHOOKS_SIGNATURE_HEADER=X-Signature
+  ```
+</ParamField>
+
+<ParamField path="webhook_auth.signature.secret" type="string" default="null">
+  The secret key used to generate and verify webhook signatures. Should be set via the `WORKFLOW_WEBHOOKS_SECRET` environment variable.
+  
+  ```php
+  'webhook_auth' => [
+      'signature' => [
+          'secret' => env('WORKFLOW_WEBHOOKS_SECRET'),
+      ],
+  ],
+  ```
+  
+  **Environment Variable:**
+  ```env
+  WORKFLOW_WEBHOOKS_SECRET=your-secret-key-here
+  ```
+</ParamField>
+
+### Token Authentication
+
+Used when `webhook_auth.method` is set to `token`.
+
+<ParamField path="webhook_auth.token.header" type="string" default="Authorization">
+  The HTTP header containing the authentication token. Can be overridden with the `WORKFLOW_WEBHOOKS_TOKEN_HEADER` environment variable.
+  
+  ```php
+  'webhook_auth' => [
+      'token' => [
+          'header' => env('WORKFLOW_WEBHOOKS_TOKEN_HEADER', 'Authorization'),
+      ],
+  ],
+  ```
+  
+  **Environment Variable:**
+  ```env
+  WORKFLOW_WEBHOOKS_TOKEN_HEADER=Authorization
+  ```
+</ParamField>
+
+<ParamField path="webhook_auth.token.token" type="string" default="null">
+  The bearer token expected in webhook requests. Should be set via the `WORKFLOW_WEBHOOKS_TOKEN` environment variable.
+  
+  ```php
+  'webhook_auth' => [
+      'token' => [
+          'token' => env('WORKFLOW_WEBHOOKS_TOKEN'),
+      ],
+  ],
+  ```
+  
+  **Environment Variable:**
+  ```env
+  WORKFLOW_WEBHOOKS_TOKEN=your-bearer-token
+  ```
+</ParamField>
+
+### Custom Authentication
+
+Used when `webhook_auth.method` is set to `custom`.
+
+<ParamField path="webhook_auth.custom.class" type="string" default="null">
+  The fully qualified class name of a custom webhook authentication handler. Can be overridden with the `WORKFLOW_WEBHOOKS_CUSTOM_AUTH_CLASS` environment variable.
+  
+  ```php
+  'webhook_auth' => [
+      'custom' => [
+          'class' => env('WORKFLOW_WEBHOOKS_CUSTOM_AUTH_CLASS', null),
+      ],
+  ],
+  ```
+  
+  **Environment Variable:**
+  ```env
+  WORKFLOW_WEBHOOKS_CUSTOM_AUTH_CLASS=App\Http\Middleware\CustomWebhookAuth
+  ```
+</ParamField>
+
+## Complete Configuration Example
+
+Here's the complete default configuration file:
+
+```php
+<?php
+
+return [
+    'workflows_folder' => 'Workflows',
+
+    'stored_workflow_model' => Workflow\Models\StoredWorkflow::class,
+
+    'stored_workflow_exception_model' => Workflow\Models\StoredWorkflowException::class,
+
+    'stored_workflow_log_model' => Workflow\Models\StoredWorkflowLog::class,
+
+    'stored_workflow_signal_model' => Workflow\Models\StoredWorkflowSignal::class,
+
+    'stored_workflow_timer_model' => Workflow\Models\StoredWorkflowTimer::class,
+
+    'workflow_relationships_table' => 'workflow_relationships',
+
+    'serializer' => Workflow\Serializers\Y::class,
+
+    'prune_age' => '1 month',
+
+    'webhooks_route' => env('WORKFLOW_WEBHOOKS_ROUTE', 'webhooks'),
+
+    'webhook_auth' => [
+        'method' => env('WORKFLOW_WEBHOOKS_AUTH_METHOD', 'none'),
+
+        'signature' => [
+            'header' => env('WORKFLOW_WEBHOOKS_SIGNATURE_HEADER', 'X-Signature'),
+            'secret' => env('WORKFLOW_WEBHOOKS_SECRET'),
+        ],
+
+        'token' => [
+            'header' => env('WORKFLOW_WEBHOOKS_TOKEN_HEADER', 'Authorization'),
+            'token' => env('WORKFLOW_WEBHOOKS_TOKEN'),
+        ],
+
+        'custom' => [
+            'class' => env('WORKFLOW_WEBHOOKS_CUSTOM_AUTH_CLASS', null),
+        ],
+    ],
+];
+```
+
+## Environment Variables Summary
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `WORKFLOW_WEBHOOKS_ROUTE` | Webhook base route | `webhooks` |
+| `WORKFLOW_WEBHOOKS_AUTH_METHOD` | Authentication method | `none` |
+| `WORKFLOW_WEBHOOKS_SIGNATURE_HEADER` | Signature header name | `X-Signature` |
+| `WORKFLOW_WEBHOOKS_SECRET` | Signature secret key | - |
+| `WORKFLOW_WEBHOOKS_TOKEN_HEADER` | Token header name | `Authorization` |
+| `WORKFLOW_WEBHOOKS_TOKEN` | Bearer token | - |
+| `WORKFLOW_WEBHOOKS_CUSTOM_AUTH_CLASS` | Custom auth class | - |
+
+## WorkflowOptions
+
+In addition to global configuration, you can specify per-workflow options using the `WorkflowOptions` class:
+
+```php
+use Workflow\WorkflowOptions;
+
+$options = new WorkflowOptions(
+    connection: 'redis',
+    queue: 'workflows'
+);
+
+Workflow::start(MyWorkflow::class, ['data'], $options);
+```
+
+<ParamField path="connection" type="string" default="null">
+  The queue connection to use for this specific workflow. If null, uses the default queue connection.
+</ParamField>
+
+<ParamField path="queue" type="string" default="null">
+  The queue name to use for this specific workflow. If null, uses the default queue.
+</ParamField>
+
+See the [Queue Configuration](/configuration/queues) page for more details on using WorkflowOptions.

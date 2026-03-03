@@ -1,0 +1,301 @@
+---
+title: "Workflow Events"
+description: "Listen to and respond to workflow and activity lifecycle events"
+---
+
+Durable Workflow dispatches events throughout the workflow and activity lifecycle. You can listen to these events to implement custom monitoring, logging, notifications, or integrations.
+
+## Event Overview
+
+All workflow and activity events are dispatched using Laravel's event system and can be listened to using standard Laravel event listeners.
+
+## Workflow Events
+
+### WorkflowStarted
+
+Dispatched when a workflow begins execution.
+
+**Class:** `Workflow\Events\WorkflowStarted`
+
+**Properties:**
+- `workflowId` (int|string) - Unique identifier for the workflow instance
+- `class` (string) - Fully qualified class name of the workflow
+- `arguments` (string) - Serialized arguments passed to the workflow
+- `timestamp` (string) - ISO 8601 timestamp when the workflow started
+
+```php
+use Workflow\Events\WorkflowStarted;
+
+Event::listen(WorkflowStarted::class, function (WorkflowStarted $event) {
+    Log::info("Workflow started", [
+        'workflow_id' => $event->workflowId,
+        'class' => $event->class,
+        'timestamp' => $event->timestamp,
+    ]);
+});
+```
+
+### WorkflowCompleted
+
+Dispatched when a workflow completes successfully.
+
+**Class:** `Workflow\Events\WorkflowCompleted`
+
+**Properties:**
+- `workflowId` (int|string) - Unique identifier for the workflow instance
+- `output` (string) - Serialized output returned by the workflow
+- `timestamp` (string) - ISO 8601 timestamp when the workflow completed
+
+```php
+use Workflow\Events\WorkflowCompleted;
+
+Event::listen(WorkflowCompleted::class, function (WorkflowCompleted $event) {
+    Log::info("Workflow completed", [
+        'workflow_id' => $event->workflowId,
+        'output' => $event->output,
+        'timestamp' => $event->timestamp,
+    ]);
+});
+```
+
+### WorkflowFailed
+
+Dispatched when a workflow fails with an exception.
+
+**Class:** `Workflow\Events\WorkflowFailed`
+
+**Properties:**
+- `workflowId` (int|string) - Unique identifier for the workflow instance
+- `output` (string) - Serialized exception or error information
+- `timestamp` (string) - ISO 8601 timestamp when the workflow failed
+
+```php
+use Workflow\Events\WorkflowFailed;
+
+Event::listen(WorkflowFailed::class, function (WorkflowFailed $event) {
+    Log::error("Workflow failed", [
+        'workflow_id' => $event->workflowId,
+        'error' => $event->output,
+        'timestamp' => $event->timestamp,
+    ]);
+    
+    // Send alert notification
+    Notification::route('slack', config('slack.webhook'))
+        ->notify(new WorkflowFailureAlert($event));
+});
+```
+
+## Activity Events
+
+### ActivityStarted
+
+Dispatched when an activity begins execution within a workflow.
+
+**Class:** `Workflow\Events\ActivityStarted`
+
+**Properties:**
+- `workflowId` (int|string) - ID of the parent workflow
+- `activityId` (string) - Unique identifier for this activity execution
+- `class` (string) - Fully qualified class name of the activity
+- `index` (int) - Sequential index of this activity in the workflow execution
+- `arguments` (string) - Serialized arguments passed to the activity
+- `timestamp` (string) - ISO 8601 timestamp when the activity started
+
+```php
+use Workflow\Events\ActivityStarted;
+
+Event::listen(ActivityStarted::class, function (ActivityStarted $event) {
+    Log::debug("Activity started", [
+        'workflow_id' => $event->workflowId,
+        'activity_id' => $event->activityId,
+        'class' => $event->class,
+        'index' => $event->index,
+    ]);
+});
+```
+
+### ActivityCompleted
+
+Dispatched when an activity completes successfully.
+
+**Class:** `Workflow\Events\ActivityCompleted`
+
+**Properties:**
+- `workflowId` (int|string) - ID of the parent workflow
+- `activityId` (string) - Unique identifier for this activity execution
+- `class` (string) - Fully qualified class name of the activity
+- `index` (int) - Sequential index of this activity in the workflow execution
+- `output` (string) - Serialized output returned by the activity
+- `timestamp` (string) - ISO 8601 timestamp when the activity completed
+
+```php
+use Workflow\Events\ActivityCompleted;
+
+Event::listen(ActivityCompleted::class, function (ActivityCompleted $event) {
+    Log::debug("Activity completed", [
+        'workflow_id' => $event->workflowId,
+        'activity_id' => $event->activityId,
+        'class' => $event->class,
+        'output' => $event->output,
+    ]);
+});
+```
+
+### ActivityFailed
+
+Dispatched when an activity fails with an exception.
+
+**Class:** `Workflow\Events\ActivityFailed`
+
+**Properties:**
+- `workflowId` (int|string) - ID of the parent workflow
+- `activityId` (string) - Unique identifier for this activity execution
+- `class` (string) - Fully qualified class name of the activity
+- `index` (int) - Sequential index of this activity in the workflow execution
+- `output` (string) - Serialized exception or error information
+- `timestamp` (string) - ISO 8601 timestamp when the activity failed
+
+```php
+use Workflow\Events\ActivityFailed;
+
+Event::listen(ActivityFailed::class, function (ActivityFailed $event) {
+    Log::warning("Activity failed", [
+        'workflow_id' => $event->workflowId,
+        'activity_id' => $event->activityId,
+        'class' => $event->class,
+        'error' => $event->output,
+    ]);
+});
+```
+
+## State Management Events
+
+### StateChanged
+
+Dispatched when a workflow or model transitions between states.
+
+**Class:** `Workflow\Events\StateChanged`
+
+**Properties:**
+- `initialState` (?State) - The state before transition (null if starting)
+- `finalState` (?State) - The state after transition (null if ending)
+- `model` (Model) - The Eloquent model whose state changed
+- `field` (string) - The field name that stores the state
+
+```php
+use Workflow\Events\StateChanged;
+
+Event::listen(StateChanged::class, function (StateChanged $event) {
+    Log::info("State changed", [
+        'model' => get_class($event->model),
+        'model_id' => $event->model->id,
+        'from' => $event->initialState?->getValue(),
+        'to' => $event->finalState?->getValue(),
+        'field' => $event->field,
+    ]);
+});
+```
+
+## Registering Event Listeners
+
+You can register event listeners in your `EventServiceProvider`:
+
+```php
+protected $listen = [
+    \Workflow\Events\WorkflowStarted::class => [
+        \App\Listeners\LogWorkflowStarted::class,
+    ],
+    \Workflow\Events\WorkflowCompleted::class => [
+        \App\Listeners\LogWorkflowCompleted::class,
+        \App\Listeners\SendWorkflowCompletionNotification::class,
+    ],
+    \Workflow\Events\WorkflowFailed::class => [
+        \App\Listeners\LogWorkflowFailure::class,
+        \App\Listeners\AlertOnWorkflowFailure::class,
+    ],
+];
+```
+
+## Common Use Cases
+
+### Custom Monitoring
+
+Track workflow performance metrics:
+
+```php
+use Workflow\Events\WorkflowStarted;
+use Workflow\Events\WorkflowCompleted;
+use Carbon\Carbon;
+
+class TrackWorkflowMetrics
+{
+    private array $startTimes = [];
+    
+    public function handleStarted(WorkflowStarted $event)
+    {
+        $this->startTimes[$event->workflowId] = $event->timestamp;
+    }
+    
+    public function handleCompleted(WorkflowCompleted $event)
+    {
+        $startTime = Carbon::parse($this->startTimes[$event->workflowId]);
+        $endTime = Carbon::parse($event->timestamp);
+        $duration = $endTime->diffInMilliseconds($startTime);
+        
+        Metrics::record('workflow.duration', $duration, [
+            'workflow' => $event->class,
+        ]);
+    }
+}
+```
+
+### Error Notifications
+
+Send notifications when workflows fail:
+
+```php
+use Workflow\Events\WorkflowFailed;
+use Illuminate\Support\Facades\Notification;
+
+class NotifyOnWorkflowFailure
+{
+    public function handle(WorkflowFailed $event)
+    {
+        $admins = User::whereHas('roles', fn($q) => $q->where('name', 'admin'))->get();
+        
+        Notification::send($admins, new WorkflowFailedNotification(
+            workflowId: $event->workflowId,
+            error: $event->output,
+            timestamp: $event->timestamp
+        ));
+    }
+}
+```
+
+### Audit Logging
+
+Maintain an audit trail of workflow executions:
+
+```php
+use Workflow\Events\WorkflowStarted;
+
+class AuditWorkflowExecution
+{
+    public function handle(WorkflowStarted $event)
+    {
+        AuditLog::create([
+            'type' => 'workflow_started',
+            'workflow_id' => $event->workflowId,
+            'workflow_class' => $event->class,
+            'arguments' => $event->arguments,
+            'timestamp' => $event->timestamp,
+            'user_id' => auth()->id(),
+        ]);
+    }
+}
+```
+
+## Next Steps
+
+- Explore the [Waterline UI](/monitoring/waterline) for visual monitoring
+- Learn about [workflow logging](/monitoring/logging) for accessing execution history

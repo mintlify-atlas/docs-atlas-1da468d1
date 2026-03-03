@@ -1,122 +1,151 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Durable Workflow",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#2563eb",
+    "light": "#3b82f6",
+    "dark": "#1e40af"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/durable-workflow/workflow"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/durable-workflow/workflow"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Getting Started",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "installation",
+              "quickstart"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/workflows",
+              "concepts/activities",
+              "concepts/workflow-stub",
+              "concepts/state-management",
+              "concepts/durability"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Workflow Patterns",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "patterns/child-workflows",
+              "patterns/signals",
+              "patterns/queries-and-updates",
+              "patterns/timers",
+              "patterns/await-conditions",
+              "patterns/sagas",
+              "patterns/continue-as-new",
+              "patterns/side-effects"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Advanced Features",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "advanced/versioning",
+              "advanced/webhooks",
+              "advanced/authentication",
+              "advanced/error-handling",
+              "advanced/retries",
+              "advanced/middleware",
+              "advanced/serialization"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/overview",
+              "configuration/queues",
+              "configuration/database",
+              "configuration/options"
+            ]
+          },
+          {
+            "group": "Monitoring",
+            "pages": [
+              "monitoring/waterline",
+              "monitoring/events",
+              "monitoring/logging"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/user-signup",
+              "examples/payment-processing",
+              "examples/data-pipeline",
+              "examples/microservices-orchestration",
+              "examples/ai-workflows"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Classes",
             "pages": [
-              "api-reference/introduction"
+              "api/workflow",
+              "api/activity",
+              "api/workflow-stub",
+              "api/child-workflow-stub",
+              "api/activity-stub"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Helper Functions",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/functions/activity",
+              "api/functions/child",
+              "api/functions/await",
+              "api/functions/timer",
+              "api/functions/side-effect",
+              "api/functions/continue-as-new",
+              "api/functions/versioning"
+            ]
+          },
+          {
+            "group": "Attributes",
+            "pages": [
+              "api/attributes/signal-method",
+              "api/attributes/query-method",
+              "api/attributes/update-method",
+              "api/attributes/webhook"
+            ]
+          },
+          {
+            "group": "Events",
+            "pages": [
+              "api/events/workflow-events",
+              "api/events/activity-events"
+            ]
+          },
+          {
+            "group": "Models",
+            "pages": [
+              "api/models/stored-workflow",
+              "api/models/stored-workflow-log",
+              "api/models/stored-workflow-exception"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

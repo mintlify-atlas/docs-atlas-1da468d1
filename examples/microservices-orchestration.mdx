@@ -1,0 +1,531 @@
+---
+title: 'Microservices Orchestration'
+description: 'Coordinate multiple microservices with child workflows and distributed transactions'
+---
+
+This example demonstrates how to orchestrate multiple microservices using child workflows, enabling complex distributed operations while maintaining consistency and reliability.
+
+## Overview
+
+The order fulfillment workflow coordinates several microservices:
+- Inventory Service (child workflow)
+- Payment Service (child workflow)
+- Shipping Service (child workflow)
+- Notification Service (activities)
+
+Each service runs as a separate child workflow with its own lifecycle and error handling.
+
+## Parent Workflow Implementation
+
+```php
+<?php
+
+namespace App\Workflows;
+
+use function Workflow\{activity, child};
+use Workflow\SignalMethod;
+use Workflow\Workflow;
+
+class OrderFulfillmentWorkflow extends Workflow
+{
+    private string $orderStatus = 'pending';
+    private ?string $trackingNumber = null;
+
+    #[SignalMethod]
+    public function updateShippingStatus(string $status, ?string $tracking = null): void
+    {
+        $this->orderStatus = $status;
+        $this->trackingNumber = $tracking;
+    }
+
+    #[SignalMethod]
+    public function cancelOrder(): void
+    {
+        $this->orderStatus = 'cancelled';
+    }
+
+    public function execute(
+        string $orderId,
+        string $customerId,
+        array $items,
+        array $shippingAddress,
+        string $paymentMethod
+    ) {
+        // Step 1: Start inventory reservation as child workflow
+        $inventoryResult = yield child(
+            InventoryReservationWorkflow::class,
+            $orderId,
+            $items
+        );
+
+        if (!$inventoryResult['success']) {
+            throw new \Exception('Insufficient inventory: ' . $inventoryResult['message']);
+        }
+
+        // Step 2: Process payment via Payment Service child workflow
+        $paymentResult = yield child(
+            PaymentProcessingChildWorkflow::class,
+            $orderId,
+            $customerId,
+            $inventoryResult['totalAmount'],
+            $paymentMethod
+        );
+
+        if (!$paymentResult['success']) {
+            // Rollback inventory reservation
+            yield child(
+                InventoryRollbackWorkflow::class,
+                $inventoryResult['reservationId']
+            );
+            
+            throw new \Exception('Payment failed: ' . $paymentResult['message']);
+        }
+
+        // Step 3: Create shipment via Shipping Service child workflow
+        $shipmentResult = yield child(
+            ShipmentCreationWorkflow::class,
+            $orderId,
+            $items,
+            $shippingAddress,
+            $inventoryResult['warehouseId']
+        );
+
+        // Step 4: Send confirmation notification
+        yield activity(
+            SendOrderConfirmationActivity::class,
+            $customerId,
+            $orderId,
+            $shipmentResult['trackingNumber']
+        );
+
+        // Step 5: Monitor shipment status (async)
+        // The shipping service will send signals as status updates
+        $this->trackingNumber = $shipmentResult['trackingNumber'];
+        $this->orderStatus = 'shipped';
+
+        return [
+            'orderId' => $orderId,
+            'status' => $this->orderStatus,
+            'reservationId' => $inventoryResult['reservationId'],
+            'paymentId' => $paymentResult['transactionId'],
+            'shipmentId' => $shipmentResult['shipmentId'],
+            'trackingNumber' => $this->trackingNumber,
+        ];
+    }
+}
+```
+
+## Child Workflow: Inventory Service
+
+```php
+<?php
+
+namespace App\Workflows;
+
+use function Workflow\activity;
+use Workflow\Workflow;
+
+class InventoryReservationWorkflow extends Workflow
+{
+    public function execute(string $orderId, array $items)
+    {
+        // Check availability across multiple warehouses
+        $availabilityCheck = yield activity(
+            CheckInventoryAvailabilityActivity::class,
+            $items
+        );
+
+        if (!$availabilityCheck['available']) {
+            return [
+                'success' => false,
+                'message' => 'Items not available',
+                'unavailableItems' => $availabilityCheck['unavailableItems'],
+            ];
+        }
+
+        // Select optimal warehouse based on location and stock
+        $warehouse = yield activity(
+            SelectOptimalWarehouseActivity::class,
+            $items,
+            $availabilityCheck['warehouses']
+        );
+
+        // Reserve inventory
+        $reservation = yield activity(
+            ReserveInventoryActivity::class,
+            $orderId,
+            $items,
+            $warehouse['id']
+        );
+
+        // Calculate total amount
+        $totalAmount = yield activity(
+            CalculateOrderTotalActivity::class,
+            $items
+        );
+
+        return [
+            'success' => true,
+            'reservationId' => $reservation['id'],
+            'warehouseId' => $warehouse['id'],
+            'totalAmount' => $totalAmount,
+        ];
+    }
+}
+```
+
+## Child Workflow: Payment Service
+
+```php
+<?php
+
+namespace App\Workflows;
+
+use function Workflow\{activity, timer};
+use Workflow\Workflow;
+
+class PaymentProcessingChildWorkflow extends Workflow
+{
+    public function execute(
+        string $orderId,
+        string $customerId,
+        float $amount,
+        string $paymentMethod
+    ) {
+        // Pre-authorize payment
+        $preAuthResult = yield activity(
+            PreAuthorizePaymentActivity::class,
+            $customerId,
+            $amount,
+            $paymentMethod
+        );
+
+        if (!$preAuthResult['success']) {
+            return [
+                'success' => false,
+                'message' => $preAuthResult['error'],
+            ];
+        }
+
+        // Apply fraud detection
+        $fraudCheck = yield activity(
+            FraudDetectionActivity::class,
+            $orderId,
+            $customerId,
+            $amount
+        );
+
+        if ($fraudCheck['risk'] === 'high') {
+            // Void pre-authorization
+            yield activity(
+                VoidPreAuthorizationActivity::class,
+                $preAuthResult['authId']
+            );
+
+            return [
+                'success' => false,
+                'message' => 'Payment flagged for fraud review',
+            ];
+        }
+
+        // Capture payment
+        $captureResult = yield activity(
+            CapturePaymentActivity::class,
+            $preAuthResult['authId']
+        );
+
+        // Send payment receipt
+        yield activity(
+            SendPaymentReceiptActivity::class,
+            $customerId,
+            $captureResult['transactionId'],
+            $amount
+        );
+
+        return [
+            'success' => true,
+            'transactionId' => $captureResult['transactionId'],
+            'amount' => $amount,
+        ];
+    }
+}
+```
+
+## Child Workflow: Shipping Service
+
+```php
+<?php
+
+namespace App\Workflows;
+
+use function Workflow\{activity, timer};
+use Workflow\Workflow;
+use Workflow\WorkflowStub;
+
+class ShipmentCreationWorkflow extends Workflow
+{
+    public function execute(
+        string $orderId,
+        array $items,
+        array $shippingAddress,
+        string $warehouseId
+    ) {
+        // Select shipping carrier based on address and weight
+        $carrier = yield activity(
+            SelectShippingCarrierActivity::class,
+            $shippingAddress,
+            $items
+        );
+
+        // Create shipping label
+        $label = yield activity(
+            CreateShippingLabelActivity::class,
+            $orderId,
+            $carrier['id'],
+            $shippingAddress,
+            $items
+        );
+
+        // Create pick list for warehouse
+        yield activity(
+            CreatePickListActivity::class,
+            $warehouseId,
+            $orderId,
+            $items
+        );
+
+        // Wait for warehouse to confirm shipment (max 2 business days)
+        yield timer('2 days');
+
+        // Send tracking notification to parent workflow
+        $parentWorkflow = WorkflowStub::load($this->storedWorkflow->parents()->first()->id);
+        $parentWorkflow->updateShippingStatus('in_transit', $label['trackingNumber']);
+
+        return [
+            'shipmentId' => $label['shipmentId'],
+            'trackingNumber' => $label['trackingNumber'],
+            'carrier' => $carrier['name'],
+            'estimatedDelivery' => $label['estimatedDelivery'],
+        ];
+    }
+}
+```
+
+## Inventory Rollback Workflow
+
+```php
+<?php
+
+namespace App\Workflows;
+
+use function Workflow\activity;
+use Workflow\Workflow;
+
+class InventoryRollbackWorkflow extends Workflow
+{
+    public function execute(string $reservationId)
+    {
+        // Release reserved inventory
+        yield activity(
+            ReleaseReservationActivity::class,
+            $reservationId
+        );
+
+        // Log rollback for audit
+        yield activity(
+            LogInventoryRollbackActivity::class,
+            $reservationId,
+            'Payment failure'
+        );
+
+        return ['status' => 'rolled_back'];
+    }
+}
+```
+
+## Example Activities
+
+### Check Inventory Availability
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Services\InventoryService;
+use Workflow\Activity;
+
+class CheckInventoryAvailabilityActivity extends Activity
+{
+    public function __construct(
+        private InventoryService $inventory
+    ) {}
+
+    public function execute(array $items): array
+    {
+        $warehouses = [];
+        $unavailableItems = [];
+
+        foreach ($items as $item) {
+            $availability = $this->inventory->checkStock(
+                $item['sku'],
+                $item['quantity']
+            );
+
+            if (!$availability['available']) {
+                $unavailableItems[] = $item['sku'];
+            } else {
+                $warehouses = array_merge(
+                    $warehouses,
+                    $availability['warehouses']
+                );
+            }
+        }
+
+        return [
+            'available' => empty($unavailableItems),
+            'unavailableItems' => $unavailableItems,
+            'warehouses' => array_unique($warehouses),
+        ];
+    }
+}
+```
+
+### Fraud Detection
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Services\FraudDetectionService;
+use Workflow\Activity;
+
+class FraudDetectionActivity extends Activity
+{
+    public function __construct(
+        private FraudDetectionService $fraudService
+    ) {}
+
+    public function execute(
+        string $orderId,
+        string $customerId,
+        float $amount
+    ): array {
+        $score = $this->fraudService->analyzeTransaction([
+            'order_id' => $orderId,
+            'customer_id' => $customerId,
+            'amount' => $amount,
+        ]);
+
+        $risk = match (true) {
+            $score >= 80 => 'high',
+            $score >= 50 => 'medium',
+            default => 'low',
+        };
+
+        return [
+            'risk' => $risk,
+            'score' => $score,
+        ];
+    }
+}
+```
+
+## Starting the Orchestration
+
+```php
+use App\Workflows\OrderFulfillmentWorkflow;
+use Workflow\WorkflowStub;
+
+$workflow = WorkflowStub::make(OrderFulfillmentWorkflow::class);
+
+$workflow->start(
+    orderId: 'ORD-12345',
+    customerId: 'CUST-67890',
+    items: [
+        ['sku' => 'WIDGET-A', 'quantity' => 2, 'price' => 29.99],
+        ['sku' => 'GADGET-B', 'quantity' => 1, 'price' => 149.99],
+    ],
+    shippingAddress: [
+        'street' => '123 Main St',
+        'city' => 'San Francisco',
+        'state' => 'CA',
+        'zip' => '94102',
+        'country' => 'US',
+    ],
+    paymentMethod: 'pm_card_visa'
+);
+
+// Monitor progress
+while ($workflow->running()) {
+    sleep(2);
+    
+    // Check child workflows
+    $children = $workflow->children();
+    foreach ($children as $child) {
+        echo "{$child->class()}: {$child->status()}\n";
+    }
+}
+
+if ($workflow->completed()) {
+    $result = $workflow->output();
+    echo "Order {$result['orderId']} fulfilled successfully\n";
+    echo "Tracking: {$result['trackingNumber']}\n";
+}
+```
+
+## Handling Service Failures
+
+### Scenario 1: Inventory Service Unavailable
+
+```php
+// The child workflow will automatically retry
+// Parent workflow waits for child to complete
+```
+
+### Scenario 2: Payment Declined
+
+```php
+// Payment child workflow returns failure
+// Parent workflow triggers inventory rollback
+// Order marked as failed
+```
+
+### Scenario 3: Partial Shipment
+
+```php
+// Shipping workflow handles split shipments
+// Multiple tracking numbers sent via signals
+// Parent workflow aggregates all shipments
+```
+
+## Monitoring Child Workflows
+
+```php
+// Get all child workflows
+$parentWorkflow = WorkflowStub::load($workflowId);
+$children = $parentWorkflow->children();
+
+foreach ($children as $child) {
+    echo "Service: {$child->class()}\n";
+    echo "Status: {$child->status()}\n";
+    
+    if ($child->completed()) {
+        echo "Output: " . json_encode($child->output()) . "\n";
+    }
+    
+    echo "---\n";
+}
+```
+
+## Key Features
+
+- **Service Isolation**: Each microservice runs as independent child workflow
+- **Distributed Transactions**: Coordinated across multiple services
+- **Automatic Rollback**: Failed operations trigger compensating workflows
+- **Signal Communication**: Child workflows can signal parent workflow
+- **Independent Scaling**: Each service scales based on its own load
+- **Fault Tolerance**: Child workflow failures don't crash parent
+- **Audit Trail**: Complete visibility into cross-service operations
+- **Async Communication**: Non-blocking communication between services

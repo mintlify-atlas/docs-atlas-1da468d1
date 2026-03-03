@@ -1,0 +1,220 @@
+---
+title: getVersion()
+description: Manage workflow code versions for safe updates
+---
+
+The `getVersion()` function enables you to safely update workflow code while maintaining compatibility with existing workflow executions. It allows different versions of workflow logic to coexist.
+
+## Signature
+
+```php
+function getVersion(
+    string $changeId,
+    int $minSupported = WorkflowStub::DEFAULT_VERSION,
+    int $maxSupported = 1
+): PromiseInterface
+```
+
+## Parameters
+
+<ParamField path="changeId" type="string" required>
+  A unique identifier for this version checkpoint. Use a descriptive name that explains what changed
+</ParamField>
+
+<ParamField path="minSupported" type="int" default="WorkflowStub::DEFAULT_VERSION">
+  The minimum version number this code supports. Workflows with versions below this will fail
+</ParamField>
+
+<ParamField path="maxSupported" type="int" default="1">
+  The maximum version number (current version). New workflows will use this version
+</ParamField>
+
+## Returns
+
+<ResponseField name="PromiseInterface" type="React\Promise\PromiseInterface">
+  A promise that resolves to the version number for this execution
+</ResponseField>
+
+## How It Works
+
+1. **New Workflows**: Receive the `maxSupported` version
+2. **Existing Workflows**: Replay with their recorded version
+3. **Version Check**: Ensures compatibility between `minSupported` and `maxSupported`
+
+## Usage
+
+```php
+use Workflow\Workflow;
+use Workflow\WorkflowStub;
+use function Workflow\{activity, getVersion};
+
+class OrderWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // Get the version for this execution
+        $version = yield getVersion('payment-processing', WorkflowStub::DEFAULT_VERSION, 2);
+        
+        // Execute different logic based on version
+        $result = match ($version) {
+            WorkflowStub::DEFAULT_VERSION => yield activity(OldPaymentActivity::class),
+            1 => yield activity(ImprovedPaymentActivity::class),
+            2 => yield activity(NewPaymentActivity::class),
+        };
+        
+        return $result;
+    }
+}
+```
+
+## Example: Multi-Step Migration
+
+```php
+use Workflow\Workflow;
+use Workflow\WorkflowStub;
+use function Workflow\{activity, getVersion};
+
+class UserRegistrationWorkflow extends Workflow
+{
+    public function execute($userData)
+    {
+        // Version 1: Added email verification
+        $emailVersion = yield getVersion('email-verification', WorkflowStub::DEFAULT_VERSION, 1);
+        
+        if ($emailVersion === WorkflowStub::DEFAULT_VERSION) {
+            // Old: Direct registration
+            yield activity(CreateUserActivity::class, $userData);
+        } else {
+            // New: With email verification
+            yield activity(SendVerificationEmailActivity::class, $userData);
+            yield activity(CreateUserActivity::class, $userData);
+        }
+        
+        // Version 2: Added phone verification
+        $phoneVersion = yield getVersion('phone-verification', WorkflowStub::DEFAULT_VERSION, 1);
+        
+        if ($phoneVersion === 1) {
+            yield activity(SendPhoneVerificationActivity::class, $userData);
+        }
+        
+        return 'registration-complete';
+    }
+}
+```
+
+## Example: Activity Changes
+
+```php
+use Workflow\Workflow;
+use Workflow\WorkflowStub;
+use function Workflow\{activity, getVersion};
+
+class DataProcessingWorkflow extends Workflow
+{
+    public function execute($data)
+    {
+        // Evolved from V1 to V2 to V3
+        $version = yield getVersion('data-processor', WorkflowStub::DEFAULT_VERSION, 3);
+        
+        $result = match ($version) {
+            WorkflowStub::DEFAULT_VERSION => [
+                'version' => 'v1',
+                'result' => yield activity(ProcessorV1Activity::class, $data),
+            ],
+            1 => [
+                'version' => 'v2',
+                'result' => yield activity(ProcessorV2Activity::class, $data),
+            ],
+            2 => [
+                'version' => 'v3',
+                'result' => yield activity(ProcessorV3Activity::class, $data),
+            ],
+            3 => [
+                'version' => 'v3-enhanced',
+                'result' => yield activity(ProcessorV3EnhancedActivity::class, $data),
+            ],
+        };
+        
+        return $result;
+    }
+}
+```
+
+## Example: Deprecating Old Versions
+
+```php
+use Workflow\Workflow;
+use Workflow\WorkflowStub;
+use function Workflow\{activity, getVersion};
+
+class ShippingWorkflow extends Workflow
+{
+    public function execute($orderId)
+    {
+        // No longer support DEFAULT_VERSION (-1)
+        // Minimum supported is version 1
+        $version = yield getVersion('shipping-logic', 1, 2);
+        
+        $result = match ($version) {
+            1 => yield activity(StandardShippingActivity::class, $orderId),
+            2 => yield activity(ExpressShippingActivity::class, $orderId),
+        };
+        
+        return $result;
+    }
+}
+```
+
+## Version Constants
+
+```php
+WorkflowStub::DEFAULT_VERSION // -1 (used for workflows created before versioning)
+```
+
+## Best Practices
+
+1. **Use Descriptive Change IDs**: Name them after what changed (e.g., 'payment-gateway-upgrade')
+2. **Version Incrementally**: Start at 1 and increment for each change
+3. **Document Versions**: Comment what each version does
+4. **Test All Versions**: Ensure old and new code paths work correctly
+5. **Deprecate Gradually**: Increase `minSupported` only after old workflows complete
+6. **One Change Per ID**: Don't reuse change IDs for different modifications
+
+## Version Migration Strategy
+
+### Phase 1: Add New Version
+```php
+$version = yield getVersion('feature-x', WorkflowStub::DEFAULT_VERSION, 2);
+// Support both old (DEFAULT_VERSION, 1) and new (2)
+```
+
+### Phase 2: Wait for Old Workflows
+```php
+// Monitor until all workflows with old versions complete
+```
+
+### Phase 3: Deprecate Old Version
+```php
+$version = yield getVersion('feature-x', 1, 2);
+// Only support versions 1 and 2
+```
+
+### Phase 4: Remove Old Code
+```php
+$version = yield getVersion('feature-x', 2, 2);
+// Only version 2 is supported
+```
+
+## Error Handling
+
+If a workflow's recorded version is outside the supported range:
+
+```php
+// Throws VersionNotSupportedException
+// Message: "Version X for change ID 'Y' is not supported"
+```
+
+## Related
+
+- [sideEffect()](/api/functions/side-effect) - Execute non-deterministic code
+- [continueAsNew()](/api/functions/continue-as-new) - Reset workflow execution

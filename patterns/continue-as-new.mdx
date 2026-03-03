@@ -1,0 +1,361 @@
+---
+title: Continue as New
+description: Reset workflow execution history to handle long-running workflows efficiently
+---
+
+Continue as New allows long-running workflows to reset their execution history by starting a new workflow instance with fresh state while maintaining logical continuity.
+
+## Overview
+
+Workflows maintain an execution history of all activities, timers, and signals. For long-running workflows (especially infinite loops), this history can grow unbounded. Continue as New solves this by completing the current workflow and starting a new instance with the same workflow class.
+
+## The Problem
+
+Without Continue as New, workflows with many iterations accumulate large histories:
+
+```php
+// ❌ History grows unbounded
+class DailyReportWorkflow extends Workflow
+{
+    public function execute()
+    {
+        $day = 0;
+        while (true) {
+            yield activity(GenerateReportActivity::class, $day);
+            yield timer('24 hours');
+            $day++;
+            // After 365 days: 730 history entries (activity + timer)
+            // After 10 years: 7,300 history entries!
+        }
+    }
+}
+```
+
+## The Solution
+
+Use `continueAsNew()` to reset history periodically:
+
+```php
+use function Workflow\{activity, continueAsNew};
+
+// ✓ History stays bounded
+class DailyReportWorkflow extends Workflow
+{
+    public function execute($day = 0)
+    {
+        yield activity(GenerateReportActivity::class, $day);
+        yield timer('24 hours');
+        
+        // Start fresh with incremented day
+        return yield continueAsNew($day + 1);
+    }
+}
+```
+
+<Note>
+Each `continueAsNew()` creates a new workflow instance with a fresh history. The old workflow completes successfully.
+</Note>
+
+## Basic Usage
+
+The `continueAsNew()` function accepts the same arguments as your workflow's `execute()` method:
+
+```php
+class CounterWorkflow extends Workflow
+{
+    public function execute(int $count = 0, int $max = 100)
+    {
+        yield activity(ProcessCountActivity::class, $count);
+        
+        if ($count >= $max) {
+            return 'completed';
+        }
+        
+        return yield continueAsNew($count + 1, $max);
+    }
+}
+```
+
+## Iterative Processing
+
+Process batches of data with history resets:
+
+```php
+class BatchProcessorWorkflow extends Workflow
+{
+    public function execute(array $items, int $offset = 0, int $batchSize = 100)
+    {
+        $batch = array_slice($items, $offset, $batchSize);
+        
+        if (empty($batch)) {
+            return 'all_items_processed';
+        }
+        
+        foreach ($batch as $item) {
+            yield activity(ProcessItemActivity::class, $item);
+        }
+        
+        // Continue with next batch
+        return yield continueAsNew($items, $offset + $batchSize, $batchSize);
+    }
+}
+```
+
+## Passing State
+
+Pass necessary state through the arguments:
+
+```php
+class StatefulWorkflow extends Workflow
+{
+    public function execute(
+        int $iteration = 0,
+        int $totalProcessed = 0,
+        array $accumulatedData = []
+    ) {
+        $result = yield activity(ProcessDataActivity::class, $iteration);
+        
+        $totalProcessed += $result['count'];
+        $accumulatedData[] = $result['summary'];
+        
+        if ($iteration >= 1000) {
+            // Final processing with accumulated data
+            yield activity(FinalizeActivity::class, $totalProcessed, $accumulatedData);
+            return 'completed';
+        }
+        
+        // Pass state to new workflow instance
+        return yield continueAsNew(
+            $iteration + 1,
+            $totalProcessed,
+            $accumulatedData
+        );
+    }
+}
+```
+
+<Warning>
+Be careful with large accumulated state - it's passed as workflow arguments. Consider persisting large data in activities instead.
+</Warning>
+
+## Scheduled Workflows
+
+Implement truly long-running scheduled workflows:
+
+```php
+class MonthlyBillingWorkflow extends Workflow
+{
+    public function execute($customerId, $month = null)
+    {
+        $month = $month ?? now()->format('Y-m');
+        
+        // Generate monthly bill
+        yield activity(GenerateInvoiceActivity::class, $customerId, $month);
+        
+        // Send bill
+        yield activity(SendInvoiceActivity::class, $customerId, $month);
+        
+        // Wait 30 days
+        yield timer('30 days');
+        
+        // Continue for next month
+        $nextMonth = Carbon::parse($month)->addMonth()->format('Y-m');
+        return yield continueAsNew($customerId, $nextMonth);
+    }
+}
+```
+
+## With Parent Workflows
+
+Continue as New properly maintains parent-child relationships:
+
+```php
+class ParentWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // Child uses continue as new
+        $result = yield child(LongRunningChildWorkflow::class);
+        
+        // Parent receives result from the final continued workflow
+        return $result;
+    }
+}
+
+class LongRunningChildWorkflow extends Workflow
+{
+    public function execute($iteration = 0)
+    {
+        yield activity(ProcessActivity::class, $iteration);
+        
+        if ($iteration >= 10) {
+            return 'child_completed';
+        }
+        
+        // Parent waits for the entire chain
+        return yield continueAsNew($iteration + 1);
+    }
+}
+```
+
+<Info>
+The parent workflow waits for all continued instances to complete. The final result is returned to the parent.
+</Info>
+
+## Options Inheritance
+
+Queue and connection settings are inherited by default:
+
+```php
+class WorkflowWithOptions extends Workflow
+{
+    public $connection = 'redis';
+    public $queue = 'high-priority';
+    
+    public function execute($count = 0)
+    {
+        yield activity(ProcessActivity::class, $count);
+        
+        if ($count >= 100) {
+            return 'completed';
+        }
+        
+        // New workflow inherits connection and queue
+        return yield continueAsNew($count + 1);
+    }
+}
+```
+
+Override options if needed:
+
+```php
+use Workflow\WorkflowOptions;
+
+public function execute($count = 0)
+{
+    yield activity(ProcessActivity::class, $count);
+    
+    if ($count >= 100) {
+        return 'completed';
+    }
+    
+    $options = new WorkflowOptions(
+        connection: 'sqs',
+        queue: 'low-priority'
+    );
+    
+    return yield continueAsNew($count + 1, $options);
+}
+```
+
+## History Size Limits
+
+When to use Continue as New:
+
+<CardGroup cols={2}>
+  <Card title="Periodic Schedules" icon="calendar-days">
+    Daily, weekly, or monthly recurring workflows
+  </Card>
+  <Card title="Iteration Count" icon="hashtag">
+    After processing N items (e.g., every 1000 iterations)
+  </Card>
+  <Card title="Time-Based" icon="clock">
+    After running for X hours/days
+  </Card>
+  <Card title="History Size" icon="database">
+    When history approaches size limits (monitor in queries)
+  </Card>
+</CardGroup>
+
+## Tracking Workflow Chains
+
+Query the workflow relationship to track the chain:
+
+```php
+use Workflow\Models\StoredWorkflow;
+
+// Get the current active workflow in a chain
+$workflow = WorkflowStub::find($originalWorkflowId);
+$activeWorkflow = $workflow->storedWorkflow
+    ->children()
+    ->wherePivot('parent_index', StoredWorkflow::ACTIVE_WORKFLOW_INDEX)
+    ->first();
+
+if ($activeWorkflow) {
+    echo "Currently running: " . $activeWorkflow->id;
+} else {
+    echo "Original workflow still running";
+}
+```
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Infinite Loops" icon="infinity">
+    Recurring tasks that run indefinitely
+  </Card>
+  <Card title="Large Iterations" icon="list">
+    Processing thousands of items in batches
+  </Card>
+  <Card title="Subscription Management" icon="rotate">
+    Monthly billing and renewal workflows
+  </Card>
+  <Card title="Monitoring" icon="chart-line">
+    Continuous health checks and metrics collection
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Reset periodically">
+    Don't wait for memory issues. Reset after a fixed number of iterations (e.g., every 100-1000 iterations).
+  </Accordion>
+  
+  <Accordion title="Minimize passed state">
+    Only pass essential state. Large data should be persisted via activities and referenced by ID.
+  </Accordion>
+  
+  <Accordion title="Document continuation logic">
+    Clearly document when and why the workflow continues as new to help future maintainers.
+  </Accordion>
+  
+  <Accordion title="Test the full chain">
+    Test workflows through multiple continuations to ensure state is properly maintained.
+  </Accordion>
+  
+  <Accordion title="Monitor chain length">
+    Track how many times a workflow continues to detect potential issues.
+  </Accordion>
+</AccordionGroup>
+
+## Anti-Patterns
+
+<Tabs>
+  <Tab title="❌ Too Frequent">
+    ```php
+    // Don't continue after every single operation
+    public function execute($count = 0) {
+        yield activity(QuickTask::class);
+        return yield continueAsNew($count + 1); // Too frequent!
+    }
+    ```
+  </Tab>
+  <Tab title="✓ Batched">
+    ```php
+    // Continue after meaningful batches
+    public function execute($count = 0) {
+        for ($i = 0; $i < 100; $i++) {
+            yield activity(QuickTask::class, $count + $i);
+        }
+        return yield continueAsNew($count + 100);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Related Patterns
+
+- [Timers](/patterns/timers) - Schedule periodic execution
+- [Child Workflows](/patterns/child-workflows) - Continue as new in hierarchies
+- [Queries and Updates](/patterns/queries-and-updates) - Monitor workflow chains

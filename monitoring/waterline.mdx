@@ -1,0 +1,53 @@
+---
+title: "Waterline UI"
+description: "Monitor and visualize your workflow executions with the Waterline dashboard"
+---
+
+Waterline is a separate UI package that provides a visual interface for monitoring your workflows. Think of Waterline as being to workflows what Horizon is to queues.
+
+## Overview
+
+Waterline works nicely alongside Laravel Horizon, providing specialized monitoring capabilities for Durable Workflow executions. It offers both a dashboard view for overview monitoring and detailed workflow views for inspecting individual execution traces.
+
+## Features
+
+### Dashboard View
+
+The dashboard provides a high-level overview of your workflow executions, including:
+
+- Active workflows and their current status
+- Recently completed workflows
+- Failed workflows requiring attention
+- Performance metrics and statistics
+
+![Waterline Dashboard](https://github.com/user-attachments/assets/5688a234-4c02-4d5e-84d4-5f40b5fa27c5)
+
+### Workflow View
+
+The detailed workflow view shows the complete execution trace of individual workflows:
+
+- Timeline of all activities executed
+- Activity arguments and outputs
+- Execution duration for each step
+- Error details for failed activities
+- Current workflow state
+
+![Workflow Execution View](https://github.com/user-attachments/assets/da685466-7747-4c2f-ae10-300041381d51)
+
+## Installation
+
+Waterline is distributed as a separate package. For installation and configuration instructions, refer to the [Waterline GitHub repository](https://github.com/durable-workflow/waterline).
+
+## Use Cases
+
+Waterline is particularly useful for:
+
+- **Debugging** - Trace the execution path of workflows and identify where failures occur
+- **Performance Monitoring** - Identify slow activities and bottlenecks
+- **Production Monitoring** - Keep track of active workflows and their health
+- **Development** - Understand workflow behavior during development and testing
+
+## Next Steps
+
+- Learn about [workflow events](/monitoring/events) that Waterline tracks
+- Explore [workflow logging](/monitoring/logging) for accessing execution history programmatically

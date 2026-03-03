@@ -1,0 +1,268 @@
+---
+title: Activity Events
+description: Events dispatched during activity execution
+---
+
+# Activity Events
+
+Activities are individual units of work within a workflow. Durable Workflow dispatches events when activities start, complete, or fail, allowing you to monitor and react to activity execution.
+
+## ActivityStarted
+
+Dispatched when an activity begins execution within a workflow.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `workflowId` | `int\|string` | Unique identifier for the parent workflow instance |
+| `activityId` | `string` | Unique identifier for this activity execution |
+| `class` | `string` | Fully qualified class name of the activity |
+| `index` | `int` | Sequential index of this activity in the workflow |
+| `arguments` | `string` | Serialized activity input arguments |
+| `timestamp` | `string` | ISO 8601 timestamp when the activity started |
+
+### Example Usage
+
+```php
+use Workflow\Events\ActivityStarted;
+use Illuminate\Support\Facades\Event;
+
+Event::listen(ActivityStarted::class, function (ActivityStarted $event) {
+    logger()->info('Activity started', [
+        'workflow_id' => $event->workflowId,
+        'activity_id' => $event->activityId,
+        'activity_class' => $event->class,
+        'index' => $event->index,
+        'started_at' => $event->timestamp,
+    ]);
+});
+```
+
+### Listening in EventServiceProvider
+
+```php
+protected $listen = [
+    \Workflow\Events\ActivityStarted::class => [
+        \App\Listeners\LogActivityStarted::class,
+        \App\Listeners\TrackActivityMetrics::class,
+    ],
+];
+```
+
+---
+
+## ActivityCompleted
+
+Dispatched when an activity successfully completes execution.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `workflowId` | `int\|string` | Unique identifier for the parent workflow instance |
+| `activityId` | `string` | Unique identifier for this activity execution |
+| `output` | `string` | Serialized activity output/result |
+| `timestamp` | `string` | ISO 8601 timestamp when the activity completed |
+| `class` | `string` | Fully qualified class name of the activity |
+| `index` | `int` | Sequential index of this activity in the workflow |
+
+### Example Usage
+
+```php
+use Workflow\Events\ActivityCompleted;
+use Illuminate\Support\Facades\Event;
+
+Event::listen(ActivityCompleted::class, function (ActivityCompleted $event) {
+    logger()->info('Activity completed', [
+        'workflow_id' => $event->workflowId,
+        'activity_id' => $event->activityId,
+        'activity_class' => $event->class,
+        'output' => $event->output,
+        'completed_at' => $event->timestamp,
+    ]);
+    
+    // Calculate activity duration
+    $startTime = cache()->get("activity.{$event->activityId}.start_time");
+    if ($startTime) {
+        $duration = strtotime($event->timestamp) - $startTime;
+        metrics()->timing('activity.duration', $duration, [
+            'class' => $event->class,
+        ]);
+    }
+});
+```
+
+### Listening in EventServiceProvider
+
+```php
+protected $listen = [
+    \Workflow\Events\ActivityCompleted::class => [
+        \App\Listeners\LogActivityCompleted::class,
+        \App\Listeners\RecordActivityMetrics::class,
+    ],
+];
+```
+
+---
+
+## ActivityFailed
+
+Dispatched when an activity fails due to an exception or error.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `workflowId` | `int\|string` | Unique identifier for the parent workflow instance |
+| `activityId` | `string` | Unique identifier for this activity execution |
+| `output` | `string` | Serialized error information or exception details |
+| `timestamp` | `string` | ISO 8601 timestamp when the activity failed |
+| `class` | `string` | Fully qualified class name of the activity |
+| `index` | `int` | Sequential index of this activity in the workflow |
+
+### Example Usage
+
+```php
+use Workflow\Events\ActivityFailed;
+use Illuminate\Support\Facades\Event;
+
+Event::listen(ActivityFailed::class, function (ActivityFailed $event) {
+    logger()->error('Activity failed', [
+        'workflow_id' => $event->workflowId,
+        'activity_id' => $event->activityId,
+        'activity_class' => $event->class,
+        'error' => $event->output,
+        'failed_at' => $event->timestamp,
+    ]);
+    
+    // Track failure metrics
+    metrics()->increment('activity.failed', 1, [
+        'class' => $event->class,
+    ]);
+    
+    // Alert if critical activity fails
+    if (str_contains($event->class, 'CriticalActivity')) {
+        Alert::send(new ActivityFailureAlert($event));
+    }
+});
+```
+
+### Listening in EventServiceProvider
+
+```php
+protected $listen = [
+    \Workflow\Events\ActivityFailed::class => [
+        \App\Listeners\LogActivityFailure::class,
+        \App\Listeners\AlertOnActivityFailure::class,
+    ],
+];
+```
+
+---
+
+## Activity Lifecycle Tracking
+
+You can track the complete lifecycle of an activity by listening to all three events:
+
+```php
+namespace App\Listeners;
+
+use Workflow\Events\ActivityStarted;
+use Workflow\Events\ActivityCompleted;
+use Workflow\Events\ActivityFailed;
+
+class ActivityLifecycleTracker
+{
+    public function handleStarted(ActivityStarted $event): void
+    {
+        cache()->put(
+            "activity.{$event->activityId}.start_time",
+            strtotime($event->timestamp),
+            now()->addHour()
+        );
+    }
+    
+    public function handleCompleted(ActivityCompleted $event): void
+    {
+        $startTime = cache()->get("activity.{$event->activityId}.start_time");
+        $duration = $startTime ? strtotime($event->timestamp) - $startTime : null;
+        
+        logger()->info('Activity lifecycle completed', [
+            'activity_id' => $event->activityId,
+            'duration_seconds' => $duration,
+        ]);
+        
+        cache()->forget("activity.{$event->activityId}.start_time");
+    }
+    
+    public function handleFailed(ActivityFailed $event): void
+    {
+        $startTime = cache()->get("activity.{$event->activityId}.start_time");
+        $duration = $startTime ? strtotime($event->timestamp) - $startTime : null;
+        
+        logger()->error('Activity lifecycle failed', [
+            'activity_id' => $event->activityId,
+            'duration_seconds' => $duration,
+            'error' => $event->output,
+        ]);
+        
+        cache()->forget("activity.{$event->activityId}.start_time");
+    }
+    
+    public function subscribe($events): array
+    {
+        return [
+            ActivityStarted::class => 'handleStarted',
+            ActivityCompleted::class => 'handleCompleted',
+            ActivityFailed::class => 'handleFailed',
+        ];
+    }
+}
+```
+
+Register the subscriber in `EventServiceProvider`:
+
+```php
+protected $subscribe = [
+    \App\Listeners\ActivityLifecycleTracker::class,
+];
+```
+
+---
+
+## Filtering Activities by Workflow
+
+You can filter activity events by their parent workflow:
+
+```php
+use Workflow\Events\ActivityCompleted;
+use Illuminate\Support\Facades\Event;
+
+Event::listen(ActivityCompleted::class, function (ActivityCompleted $event) {
+    // Only handle activities from specific workflows
+    $workflow = Workflow::find($event->workflowId);
+    
+    if ($workflow && $workflow->class === \App\Workflows\OrderProcessing::class) {
+        // Handle order processing activity completion
+        ProcessOrderActivity::dispatch($event->activityId);
+    }
+});
+```
+
+---
+
+## Global Activity Event Listening
+
+You can listen to all activity events using a wildcard listener:
+
+```php
+use Illuminate\Support\Facades\Event;
+
+Event::listen('Workflow\\Events\\Activity*', function (string $eventName, array $data) {
+    logger()->debug('Activity event fired', [
+        'event' => $eventName,
+        'data' => $data,
+    ]);
+});
+```

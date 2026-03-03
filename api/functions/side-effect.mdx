@@ -1,0 +1,152 @@
+---
+title: sideEffect()
+description: Execute non-deterministic code safely within a workflow
+---
+
+The `sideEffect()` function allows you to execute non-deterministic operations within a workflow while maintaining determinism during replay. It ensures that the result is recorded and replayed consistently.
+
+## Signature
+
+```php
+function sideEffect($callable): PromiseInterface
+```
+
+## Parameters
+
+<ParamField path="callable" type="callable">
+  A callable that performs a non-deterministic operation. The result will be recorded on first execution and replayed on subsequent executions
+</ParamField>
+
+## Returns
+
+<ResponseField name="PromiseInterface" type="React\Promise\PromiseInterface">
+  A promise that resolves to the result of the callable
+</ResponseField>
+
+## Why Use sideEffect()?
+
+Workflows must be deterministic to ensure consistent replay. Operations like `random_int()`, `microtime()`, or `uniqid()` produce different values on each execution, which breaks determinism.
+
+The `sideEffect()` function solves this by:
+1. Executing the callable on the first run
+2. Recording the result in the workflow history
+3. Replaying the recorded result on subsequent executions
+
+## Usage
+
+```php
+use Workflow\Workflow;
+use function Workflow\{sideEffect, activity};
+
+class RandomWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // CORRECT: Wrapped in sideEffect()
+        $randomValue = yield sideEffect(static fn () => random_int(PHP_INT_MIN, PHP_INT_MAX));
+        
+        // Use the random value in an activity
+        $result = yield activity(ProcessActivity::class, $randomValue);
+        
+        return $result;
+    }
+}
+```
+
+## Example: Deterministic vs Non-Deterministic
+
+```php
+use Workflow\Workflow;
+use function Workflow\{sideEffect, activity};
+
+class SideEffectDemoWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // CORRECT: Deterministic - will replay the same value
+        $goodRandom = yield sideEffect(static fn () => random_int(PHP_INT_MIN, PHP_INT_MAX));
+        
+        // INCORRECT: Non-deterministic - will be different on replay
+        $badRandom = random_int(PHP_INT_MIN, PHP_INT_MAX);
+        
+        // Pass to activities
+        $result1 = yield activity(TestActivity::class, $goodRandom);
+        $result2 = yield activity(TestActivity::class, $badRandom);
+        
+        // $goodRandom will always match $result1 (deterministic)
+        // $badRandom will NOT match $result2 on replay (non-deterministic)
+        
+        return 'workflow';
+    }
+}
+```
+
+## Example: UUID Generation
+
+```php
+use Workflow\Workflow;
+use function Workflow\{sideEffect, activity};
+use Ramsey\Uuid\Uuid;
+
+class OrderWorkflow extends Workflow
+{
+    public function execute($orderData)
+    {
+        // Generate a deterministic UUID
+        $orderId = yield sideEffect(static fn () => Uuid::uuid4()->toString());
+        
+        // Use the UUID in activities
+        yield activity(CreateOrderActivity::class, $orderId, $orderData);
+        yield activity(SendConfirmationActivity::class, $orderId);
+        
+        return $orderId;
+    }
+}
+```
+
+## Example: Current Time
+
+```php
+use Workflow\Workflow;
+use function Workflow\{sideEffect, timer, now};
+
+class TimeTrackingWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // Record the start time (deterministic)
+        $startTime = yield sideEffect(static fn () => now());
+        
+        // Wait for 1 second
+        yield timer(1);
+        
+        // Record the end time (deterministic)
+        $endTime = yield sideEffect(static fn () => now());
+        
+        // Calculate elapsed time
+        $elapsed = $startTime->diffInSeconds($endTime);
+        
+        return $elapsed; // Always returns 1
+    }
+}
+```
+
+## Common Use Cases
+
+- Generating random numbers
+- Generating UUIDs or unique IDs
+- Getting the current timestamp
+- Reading environment variables
+- Accessing external state
+
+## Important Notes
+
+- Always use `sideEffect()` for non-deterministic operations
+- The callable should be a pure function with no external side effects
+- The result must be serializable
+- Do not use for operations that modify external state (use activities instead)
+
+## Related
+
+- [activity()](/api/functions/activity) - Execute activities with side effects
+- [Durability](/concepts/durability#deterministic-time) - Understanding workflow time

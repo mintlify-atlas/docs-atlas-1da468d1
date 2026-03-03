@@ -1,0 +1,284 @@
+---
+title: ChildWorkflowStub
+description: Interface for spawning and managing child workflows
+---
+
+## Overview
+
+The `ChildWorkflowStub` class provides methods for creating and managing child workflows from within a parent workflow. Child workflows are independent workflow instances that can be awaited and composed within a parent workflow's execution.
+
+## Static Methods
+
+### make()
+
+```php
+public static function make($workflow, ...$arguments): PromiseInterface
+```
+
+Creates and starts a child workflow, returning a promise that resolves when the child completes.
+
+<ParamField path="workflow" type="string" required>
+  The fully qualified child workflow class name
+</ParamField>
+
+<ParamField path="arguments" type="mixed" required>
+  Variable arguments passed to the child workflow's execute method
+</ParamField>
+
+**Returns:** `PromiseInterface` that resolves to the child workflow's output
+
+### Example
+
+```php
+use Workflow\Workflow;
+use Workflow\ChildWorkflowStub;
+
+class ParentWorkflow extends Workflow
+{
+    public function execute(Order $order)
+    {
+        // Start a child workflow and await its result
+        $paymentResult = yield ChildWorkflowStub::make(
+            ProcessPaymentWorkflow::class,
+            $order->amount,
+            $order->paymentMethod
+        );
+
+        // Start another child workflow
+        $shippingResult = yield ChildWorkflowStub::make(
+            ShippingWorkflow::class,
+            $order->address
+        );
+
+        return [
+            'payment' => $paymentResult,
+            'shipping' => $shippingResult,
+        ];
+    }
+}
+```
+
+### all()
+
+```php
+public static function all(iterable $promises): PromiseInterface
+```
+
+Waits for all child workflow promises to complete and returns their results as an array.
+
+<ParamField path="promises" type="iterable" required>
+  An iterable collection of child workflow promises
+</ParamField>
+
+**Returns:** `PromiseInterface` that resolves to an array of results
+
+### Example
+
+```php
+use Workflow\Workflow;
+use Workflow\ChildWorkflowStub;
+
+class OrderProcessingWorkflow extends Workflow
+{
+    public function execute(array $orders)
+    {
+        // Start multiple child workflows in parallel
+        $promises = [];
+        foreach ($orders as $order) {
+            $promises[] = ChildWorkflowStub::make(
+                ProcessOrderWorkflow::class,
+                $order
+            );
+        }
+
+        // Wait for all children to complete
+        $results = yield ChildWorkflowStub::all($promises);
+
+        return [
+            'total_orders' => count($results),
+            'results' => $results,
+        ];
+    }
+}
+```
+
+## Behavior and Characteristics
+
+### Deterministic Execution
+
+Child workflows maintain deterministic execution through the parent's history log. During replay, child workflow calls use cached results from the execution log.
+
+```php
+public function execute()
+{
+    // First execution: child workflow runs
+    // Replay: result comes from log
+    $result = yield ChildWorkflowStub::make(ChildWorkflow::class, $arg);
+    
+    // The result is always the same on replay
+    return $result;
+}
+```
+
+### Workflow Options
+
+Child workflows inherit queue connection and queue name from the parent unless explicitly overridden.
+
+```php
+use Workflow\WorkflowOptions;
+
+public function execute()
+{
+    // Child inherits parent's queue settings
+    $result1 = yield ChildWorkflowStub::make(ChildWorkflow::class, $arg);
+
+    // Child uses custom queue settings
+    $result2 = yield ChildWorkflowStub::make(
+        ChildWorkflow::class,
+        $arg,
+        new WorkflowOptions(
+            connection: 'redis',
+            queue: 'high-priority'
+        )
+    );
+    
+    return [$result1, $result2];
+}
+```
+
+### Testing with Fakes
+
+When workflows are faked using `WorkflowStub::fake()`, child workflows can be mocked.
+
+```php
+use Workflow\WorkflowStub;
+
+public function test_parent_workflow_with_mocked_child()
+{
+    WorkflowStub::fake([
+        ChildWorkflow::class => ['status' => 'success'],
+    ]);
+
+    $workflow = WorkflowStub::make(ParentWorkflow::class);
+    $workflow->start($data);
+
+    // Child workflow returns mocked value
+    $this->assertTrue($workflow->completed());
+    $this->assertEquals(['status' => 'success'], $workflow->output());
+}
+```
+
+## Complete Example
+
+```php
+use Workflow\Workflow;
+use Workflow\ChildWorkflowStub;
+use Workflow\WorkflowOptions;
+
+class EcommerceOrderWorkflow extends Workflow
+{
+    public function execute(Order $order)
+    {
+        // Process payment in a child workflow
+        $paymentResult = yield ChildWorkflowStub::make(
+            PaymentWorkflow::class,
+            $order->id,
+            $order->amount
+        );
+
+        if ($paymentResult['status'] !== 'success') {
+            return ['status' => 'payment_failed'];
+        }
+
+        // Process multiple fulfillment tasks in parallel
+        $fulfillmentTasks = [];
+        
+        foreach ($order->items as $item) {
+            $fulfillmentTasks[] = ChildWorkflowStub::make(
+                InventoryReservationWorkflow::class,
+                $item->sku,
+                $item->quantity
+            );
+        }
+
+        // Wait for all inventory reservations
+        $reservations = yield ChildWorkflowStub::all($fulfillmentTasks);
+
+        // Start shipping workflow with high priority
+        $shippingResult = yield ChildWorkflowStub::make(
+            ShippingWorkflow::class,
+            $order->id,
+            $order->address,
+            new WorkflowOptions(
+                queue: 'high-priority'
+            )
+        );
+
+        // Send notification workflow (fire and forget style)
+        yield ChildWorkflowStub::make(
+            NotificationWorkflow::class,
+            $order->customer->email,
+            'order_shipped',
+            ['tracking' => $shippingResult['tracking_number']]
+        );
+
+        return [
+            'status' => 'completed',
+            'payment' => $paymentResult,
+            'reservations' => $reservations,
+            'shipping' => $shippingResult,
+        ];
+    }
+}
+```
+
+## Key Differences from Activities
+
+| Feature | Child Workflow | Activity |
+|---------|---------------|----------|
+| **Execution** | Full workflow with state | Single unit of work |
+| **Retries** | Follows workflow retry logic | Configurable retry policy |
+| **State** | Can have queries/signals | No state management |
+| **Nesting** | Can spawn more children | Cannot spawn workflows |
+| **Use Case** | Complex multi-step processes | Single operations (API calls, DB updates) |
+
+```php
+// Use Activity for simple operations
+$result = yield ActivityStub::make(SendEmailActivity::class, $email);
+
+// Use Child Workflow for complex processes
+$result = yield ChildWorkflowStub::make(
+    MultiStepOnboardingWorkflow::class,
+    $user
+);
+```
+
+## Accessing Child Workflows from Parent
+
+You can access information about spawned child workflows from within the parent workflow:
+
+```php
+use Workflow\Workflow;
+use Workflow\ChildWorkflowStub;
+
+class ParentWorkflow extends Workflow
+{
+    public function execute()
+    {
+        yield ChildWorkflowStub::make(ChildWorkflow::class, $arg);
+        
+        // Get the most recent child
+        $child = $this->child();
+        if ($child) {
+            $childId = $child->id();
+            $childStatus = $child->status();
+        }
+        
+        // Get all children
+        $allChildren = $this->children();
+        foreach ($allChildren as $child) {
+            // Access each child handle
+        }
+    }
+}
+```

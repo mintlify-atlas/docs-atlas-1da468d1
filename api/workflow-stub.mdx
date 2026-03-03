@@ -1,0 +1,596 @@
+---
+title: WorkflowStub
+description: Client interface for interacting with workflow instances
+---
+
+## Overview
+
+The `WorkflowStub` class provides the primary interface for creating, starting, querying, and controlling workflow instances. It acts as a handle to interact with both new and existing workflows.
+
+## Traits Used
+
+- `Awaits` - Provides methods for awaiting conditions
+- `AwaitWithTimeouts` - Adds timeout support to await operations
+- `Continues` - Enables workflow continuation
+- `Fakes` - Provides testing/mocking support
+- `Macroable` - Allows dynamic method addition
+- `SideEffects` - Handles non-deterministic operations
+- `Timers` - Provides timer functionality
+- `Versions` - Supports workflow versioning
+
+## Constants
+
+<ParamField path="DEFAULT_VERSION" type="int" default="-1">
+  The default version number for workflows
+</ParamField>
+
+## Static Methods
+
+### make()
+
+```php
+public static function make($class): static
+```
+
+Creates a new workflow instance without starting it.
+
+<ParamField path="class" type="string" required>
+  The fully qualified workflow class name
+</ParamField>
+
+**Returns:** A new `WorkflowStub` instance
+
+### Example
+
+```php
+use Workflow\WorkflowStub;
+
+$workflow = WorkflowStub::make(OrderWorkflow::class);
+$workflow->start($order);
+```
+
+### load()
+
+```php
+public static function load($id)
+```
+
+Loads an existing workflow by ID.
+
+<ParamField path="id" type="string" required>
+  The workflow instance ID (UUID)
+</ParamField>
+
+**Returns:** A `WorkflowStub` instance for the loaded workflow
+
+### Example
+
+```php
+$workflow = WorkflowStub::load('01234567-89ab-cdef-0123-456789abcdef');
+$status = $workflow->status();
+```
+
+### fromStoredWorkflow()
+
+```php
+public static function fromStoredWorkflow(StoredWorkflow $storedWorkflow): static
+```
+
+Creates a workflow stub from an existing `StoredWorkflow` model.
+
+<ParamField path="storedWorkflow" type="StoredWorkflow" required>
+  The stored workflow model instance
+</ParamField>
+
+**Returns:** A new `WorkflowStub` instance
+
+### Example
+
+```php
+$stored = StoredWorkflow::where('class', OrderWorkflow::class)->first();
+$workflow = WorkflowStub::fromStoredWorkflow($stored);
+```
+
+### getContext()
+
+```php
+public static function getContext(): \stdClass
+```
+
+Returns the current workflow execution context.
+
+**Returns:** Object with properties: `storedWorkflow`, `index`, `now`, `replaying`
+
+### Example
+
+```php
+public function execute()
+{
+    $context = WorkflowStub::getContext();
+    $isReplaying = $context->replaying;
+    $currentIndex = $context->index;
+}
+```
+
+### setContext()
+
+```php
+public static function setContext($context): void
+```
+
+Sets the workflow execution context.
+
+<ParamField path="context" type="array|object" required>
+  Context object with workflow execution state
+</ParamField>
+
+### Example
+
+```php
+WorkflowStub::setContext([
+    'storedWorkflow' => $storedWorkflow,
+    'index' => 0,
+    'now' => Carbon::now(),
+    'replaying' => false,
+]);
+```
+
+### now()
+
+```php
+public static function now()
+```
+
+Returns the current deterministic timestamp for the workflow.
+
+**Returns:** Carbon instance representing the workflow's current time
+
+### Example
+
+```php
+public function execute()
+{
+    // Don't use Carbon::now() - use WorkflowStub::now()
+    $currentTime = WorkflowStub::now();
+    
+    yield ActivityStub::make(ScheduleReminder::class, $currentTime->addHours(24));
+}
+```
+
+### connection()
+
+```php
+public static function connection()
+```
+
+Returns the queue connection for the current workflow.
+
+**Returns:** String connection name or null
+
+### queue()
+
+```php
+public static function queue()
+```
+
+Returns the queue name for the current workflow.
+
+**Returns:** String queue name or null
+
+### isUpdateMethod()
+
+```php
+public static function isUpdateMethod(string $class, string $method): bool
+```
+
+Checks if a method is marked with the `UpdateMethod` attribute.
+
+<ParamField path="class" type="string" required>
+  The workflow class name
+</ParamField>
+
+<ParamField path="method" type="string" required>
+  The method name to check
+</ParamField>
+
+**Returns:** Boolean indicating if the method is an update method
+
+### getDefaultProperties()
+
+```php
+public static function getDefaultProperties(string $class): array
+```
+
+Returns default property values for a workflow class.
+
+<ParamField path="class" type="string" required>
+  The workflow class name
+</ParamField>
+
+**Returns:** Array of property names and default values
+
+## Instance Methods
+
+### id()
+
+```php
+public function id()
+```
+
+Returns the workflow instance ID.
+
+**Returns:** String UUID
+
+### Example
+
+```php
+$workflow = WorkflowStub::make(OrderWorkflow::class);
+$workflow->start($order);
+
+$id = $workflow->id();
+// Returns: "01234567-89ab-cdef-0123-456789abcdef"
+```
+
+### start()
+
+```php
+public function start(...$arguments): void
+```
+
+Starts the workflow with the provided arguments.
+
+<ParamField path="arguments" type="mixed" required>
+  Variable arguments passed to the workflow execute method
+</ParamField>
+
+### Example
+
+```php
+$workflow = WorkflowStub::make(OrderWorkflow::class);
+$workflow->start($order, new WorkflowOptions(
+    connection: 'redis',
+    queue: 'high-priority'
+));
+```
+
+### startAsChild()
+
+```php
+public function startAsChild(
+    StoredWorkflow $parentWorkflow,
+    int $index,
+    $now,
+    ...$arguments
+): void
+```
+
+Starts the workflow as a child of another workflow.
+
+<ParamField path="parentWorkflow" type="StoredWorkflow" required>
+  The parent workflow's stored model
+</ParamField>
+
+<ParamField path="index" type="int" required>
+  The parent workflow's execution index
+</ParamField>
+
+<ParamField path="now" type="Carbon|string" required>
+  The parent workflow's current timestamp
+</ParamField>
+
+<ParamField path="arguments" type="mixed" required>
+  Arguments for the child workflow
+</ParamField>
+
+### status()
+
+```php
+public function status(): string|bool
+```
+
+Returns the workflow's current status class.
+
+**Returns:** Fully qualified status class name
+
+### Example
+
+```php
+$status = $workflow->status();
+
+if ($status === WorkflowCompletedStatus::class) {
+    echo "Workflow completed!";
+}
+```
+
+### completed()
+
+```php
+public function completed(): bool
+```
+
+Checks if the workflow has completed successfully.
+
+**Returns:** Boolean
+
+### Example
+
+```php
+if ($workflow->completed()) {
+    $result = $workflow->output();
+}
+```
+
+### created()
+
+```php
+public function created(): bool
+```
+
+Checks if the workflow is in created state (not yet started).
+
+**Returns:** Boolean
+
+### failed()
+
+```php
+public function failed(): bool
+```
+
+Checks if the workflow has failed.
+
+**Returns:** Boolean
+
+### Example
+
+```php
+if ($workflow->failed()) {
+    $exceptions = $workflow->exceptions();
+    foreach ($exceptions as $exception) {
+        Log::error('Workflow error', ['error' => $exception]);
+    }
+}
+```
+
+### running()
+
+```php
+public function running(): bool
+```
+
+Checks if the workflow is currently running (not completed or failed).
+
+**Returns:** Boolean
+
+### output()
+
+```php
+public function output()
+```
+
+Returns the workflow's output value after completion.
+
+**Returns:** Mixed value returned by the workflow's execute method, or null if not completed
+
+### Example
+
+```php
+$workflow = WorkflowStub::load($workflowId);
+
+if ($workflow->completed()) {
+    $result = $workflow->output();
+    echo "Order total: " . $result['total'];
+}
+```
+
+### logs()
+
+```php
+public function logs()
+```
+
+Returns the workflow's execution logs.
+
+**Returns:** Collection of log entries
+
+### exceptions()
+
+```php
+public function exceptions()
+```
+
+Returns exceptions that occurred during workflow execution.
+
+**Returns:** Collection of exception records
+
+### fresh()
+
+```php
+public function fresh(): static
+```
+
+Refreshes the workflow state from the database.
+
+**Returns:** The workflow stub instance
+
+### Example
+
+```php
+$workflow->fresh()->status();
+```
+
+### resume()
+
+```php
+public function resume(): void
+```
+
+Resumes a paused workflow by dispatching it to the queue.
+
+### Example
+
+```php
+$workflow = WorkflowStub::load($workflowId);
+$workflow->resume();
+```
+
+### fail()
+
+```php
+public function fail($exception): void
+```
+
+Manually fails the workflow with an exception.
+
+<ParamField path="exception" type="Throwable" required>
+  The exception that caused the failure
+</ParamField>
+
+### Example
+
+```php
+try {
+    // Some operation
+} catch (\Exception $e) {
+    $workflow->fail($e);
+}
+```
+
+### next()
+
+```php
+public function next(
+    $index,
+    $now,
+    $class,
+    $result,
+    bool $shouldSignal = true
+): void
+```
+
+Records the next step in workflow execution history.
+
+<ParamField path="index" type="int" required>
+  The execution index
+</ParamField>
+
+<ParamField path="now" type="Carbon|string" required>
+  The timestamp for this step
+</ParamField>
+
+<ParamField path="class" type="string" required>
+  The class that was executed
+</ParamField>
+
+<ParamField path="result" type="mixed" required>
+  The result of the execution
+</ParamField>
+
+<ParamField path="shouldSignal" type="bool" default="true">
+  Whether to dispatch the workflow to continue
+</ParamField>
+
+## Magic Methods
+
+### __call()
+
+```php
+public function __call($method, $arguments)
+```
+
+Handles signal, query, and update method calls dynamically.
+
+- **Signal Methods**: Send asynchronous signals to the workflow
+- **Query Methods**: Read workflow state without side effects
+- **Update Methods**: Modify workflow state and optionally trigger execution
+
+### Example
+
+```php
+use Workflow\Workflow;
+use Workflow\SignalMethod;
+use Workflow\QueryMethod;
+use Workflow\UpdateMethod;
+
+class OrderWorkflow extends Workflow
+{
+    private string $status = 'pending';
+    private int $quantity = 0;
+
+    #[SignalMethod]
+    public function cancelOrder(): void
+    {
+        $this->status = 'cancelled';
+    }
+
+    #[QueryMethod]
+    public function getStatus(): string
+    {
+        return $this->status;
+    }
+
+    #[UpdateMethod]
+    public function updateQuantity(int $qty): void
+    {
+        $this->quantity = $qty;
+    }
+}
+
+// Using the workflow stub
+$workflow = WorkflowStub::make(OrderWorkflow::class);
+$workflow->start($order);
+
+// Call signal method
+$workflow->cancelOrder();
+
+// Call query method
+$status = $workflow->getStatus();
+
+// Call update method
+$workflow->updateQuantity(5);
+```
+
+## Complete Example
+
+```php
+use Workflow\WorkflowStub;
+use App\Workflows\OrderWorkflow;
+use App\Models\Order;
+
+// Create and start a new workflow
+$order = Order::find(1);
+$workflow = WorkflowStub::make(OrderWorkflow::class);
+$workflow->start($order);
+
+// Store the workflow ID
+$workflowId = $workflow->id();
+
+// Later, load and check status
+$workflow = WorkflowStub::load($workflowId);
+
+if ($workflow->running()) {
+    echo "Order is being processed...";
+}
+
+// Query current state
+$status = $workflow->getStatus(); // Calls query method
+
+// Send a signal
+$workflow->cancelOrder(); // Calls signal method
+
+// Check if completed
+if ($workflow->completed()) {
+    $result = $workflow->output();
+    echo "Order completed: " . json_encode($result);
+}
+
+// Handle failures
+if ($workflow->failed()) {
+    $exceptions = $workflow->exceptions();
+    foreach ($exceptions as $exception) {
+        Log::error('Workflow failed', [
+            'workflow_id' => $workflowId,
+            'error' => $exception,
+        ]);
+    }
+}
+```

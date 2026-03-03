@@ -1,0 +1,581 @@
+---
+title: 'AI Agent Workflows'
+description: 'LLM-based agentic workflows with retries, human-in-the-loop, and conversation state management'
+---
+
+This example demonstrates an AI agent workflow that processes customer support tickets using LLMs, with automatic retries, human escalation, and conversation state management.
+
+## Overview
+
+The AI support agent workflow:
+- Analyzes incoming support tickets
+- Generates responses using LLMs
+- Handles multi-turn conversations
+- Escalates to humans when needed
+- Maintains conversation context
+- Implements retry logic for API failures
+
+## Workflow Implementation
+
+```php
+<?php
+
+namespace App\Workflows;
+
+use function Workflow\{activity, await, awaitWithTimeout};
+use Workflow\SignalMethod;
+use Workflow\UpdateMethod;
+use Workflow\Workflow;
+
+class AiSupportAgentWorkflow extends Workflow
+{
+    private array $conversationHistory = [];
+    private bool $escalatedToHuman = false;
+    private ?string $assignedAgent = null;
+
+    #[SignalMethod]
+    public function receiveMessage(string $message, string $customerId): void
+    {
+        $this->inbox->receive([
+            'message' => $message,
+            'customerId' => $customerId,
+            'timestamp' => now()->toIso8601String(),
+        ]);
+    }
+
+    #[SignalMethod]
+    public function escalateToHuman(string $reason): void
+    {
+        $this->escalatedToHuman = true;
+    }
+
+    #[SignalMethod]
+    public function assignHumanAgent(string $agentId): void
+    {
+        $this->assignedAgent = $agentId;
+    }
+
+    #[UpdateMethod]
+    public function getResponse()
+    {
+        return $this->outbox->nextUnsent();
+    }
+
+    #[UpdateMethod]
+    public function getConversationHistory(): array
+    {
+        return $this->conversationHistory;
+    }
+
+    public function execute(string $ticketId, string $initialMessage, string $customerId)
+    {
+        // Step 1: Analyze ticket category and sentiment
+        $analysis = yield activity(
+            AnalyzeTicketActivity::class,
+            $ticketId,
+            $initialMessage
+        );
+
+        $this->conversationHistory[] = [
+            'role' => 'user',
+            'content' => $initialMessage,
+            'timestamp' => now()->toIso8601String(),
+        ];
+
+        // Step 2: Check if immediate escalation needed
+        if ($analysis['sentiment'] === 'very_negative' || $analysis['urgency'] === 'critical') {
+            $this->escalatedToHuman = true;
+            
+            yield activity(
+                CreateHumanEscalationActivity::class,
+                $ticketId,
+                $customerId,
+                $analysis
+            );
+        }
+
+        // Step 3: AI conversation loop (max 10 turns or until resolved)
+        $turnCount = 0;
+        $maxTurns = 10;
+        $resolved = false;
+
+        while ($turnCount < $maxTurns && !$resolved && !$this->escalatedToHuman) {
+            // Generate AI response
+            $aiResponse = yield activity(
+                GenerateAiResponseActivity::class,
+                $ticketId,
+                $this->conversationHistory,
+                $analysis['category']
+            );
+
+            $this->conversationHistory[] = [
+                'role' => 'assistant',
+                'content' => $aiResponse['message'],
+                'timestamp' => now()->toIso8601String(),
+            ];
+
+            // Send response to customer
+            $this->outbox->send($aiResponse['message']);
+
+            // Check if AI suggests escalation
+            if ($aiResponse['confidence'] < 0.6) {
+                yield activity(
+                    SuggestHumanEscalationActivity::class,
+                    $ticketId,
+                    'Low confidence response'
+                );
+            }
+
+            // Check if issue marked as resolved
+            if ($aiResponse['resolved']) {
+                $resolved = true;
+                break;
+            }
+
+            // Wait for customer response (max 30 minutes)
+            try {
+                yield awaitWithTimeout(
+                    '30 minutes',
+                    fn() => $this->inbox->hasUnread()
+                );
+
+                $customerMessage = $this->inbox->nextUnread();
+                $this->conversationHistory[] = [
+                    'role' => 'user',
+                    'content' => $customerMessage['message'],
+                    'timestamp' => $customerMessage['timestamp'],
+                ];
+
+                // Analyze sentiment of follow-up
+                $followUpAnalysis = yield activity(
+                    AnalyzeSentimentActivity::class,
+                    $customerMessage['message']
+                );
+
+                if ($followUpAnalysis['sentiment'] === 'very_negative') {
+                    $this->escalatedToHuman = true;
+                }
+
+            } catch (\Workflow\Exceptions\TimeoutException $e) {
+                // Customer didn't respond, assume resolved
+                $resolved = true;
+            }
+
+            $turnCount++;
+        }
+
+        // Step 4: Handle escalation if needed
+        if ($this->escalatedToHuman) {
+            yield activity(
+                NotifyHumanAgentActivity::class,
+                $ticketId,
+                $this->conversationHistory
+            );
+
+            // Wait for human agent assignment
+            yield await(fn() => $this->assignedAgent !== null);
+
+            // Human agent takes over - workflow continues to monitor
+            yield activity(
+                TransferToHumanActivity::class,
+                $ticketId,
+                $this->assignedAgent
+            );
+
+            return [
+                'status' => 'escalated',
+                'ticketId' => $ticketId,
+                'assignedAgent' => $this->assignedAgent,
+                'turns' => $turnCount,
+            ];
+        }
+
+        // Step 5: Mark ticket as resolved
+        yield activity(
+            ResolveTicketActivity::class,
+            $ticketId,
+            $this->conversationHistory
+        );
+
+        // Step 6: Send satisfaction survey
+        yield activity(
+            SendSatisfactionSurveyActivity::class,
+            $customerId,
+            $ticketId
+        );
+
+        return [
+            'status' => 'resolved',
+            'ticketId' => $ticketId,
+            'turns' => $turnCount,
+            'conversationHistory' => $this->conversationHistory,
+        ];
+    }
+}
+```
+
+## Activity Implementations
+
+### Analyze Ticket Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Services\LlmService;
+use Workflow\Activity;
+
+class AnalyzeTicketActivity extends Activity
+{
+    public int $tries = 3;
+    
+    public function __construct(
+        private LlmService $llm
+    ) {}
+
+    public function execute(string $ticketId, string $message): array
+    {
+        $prompt = """
+        Analyze this customer support ticket:
+        
+        Message: {$message}
+        
+        Provide:
+        1. Category (billing, technical, general)
+        2. Sentiment (positive, neutral, negative, very_negative)
+        3. Urgency (low, medium, high, critical)
+        4. Key issues mentioned
+        """;
+
+        $response = $this->llm->complete([
+            'model' => 'gpt-4',
+            'messages' => [
+                ['role' => 'system', 'content' => 'You are a support ticket analyzer.'],
+                ['role' => 'user', 'content' => $prompt],
+            ],
+            'response_format' => ['type' => 'json_object'],
+        ]);
+
+        return json_decode($response['content'], true);
+    }
+}
+```
+
+### Generate AI Response Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Services\LlmService;
+use Workflow\Activity;
+
+class GenerateAiResponseActivity extends Activity
+{
+    public int $tries = 3;
+    public int $timeout = 30;
+
+    public function __construct(
+        private LlmService $llm
+    ) {}
+
+    public function execute(
+        string $ticketId,
+        array $conversationHistory,
+        string $category
+    ): array {
+        // Load knowledge base for category
+        $knowledgeBase = cache()->remember(
+            "kb:{$category}",
+            3600,
+            fn() => $this->loadKnowledgeBase($category)
+        );
+
+        $systemPrompt = """
+        You are a helpful customer support agent for our company.
+        
+        Knowledge Base:
+        {$knowledgeBase}
+        
+        Instructions:
+        - Be empathetic and professional
+        - Provide accurate information from the knowledge base
+        - If you're not confident, suggest escalation
+        - Ask clarifying questions if needed
+        - Mark conversation as resolved when issue is solved
+        """;
+
+        $messages = [
+            ['role' => 'system', 'content' => $systemPrompt],
+            ...$conversationHistory,
+        ];
+
+        $response = $this->llm->complete([
+            'model' => 'gpt-4',
+            'messages' => $messages,
+            'temperature' => 0.7,
+        ]);
+
+        // Calculate confidence based on response characteristics
+        $confidence = $this->calculateConfidence($response);
+        
+        // Detect if issue is resolved
+        $resolved = $this->detectResolution($response['content']);
+
+        // Send heartbeat for long-running LLM calls
+        $this->heartbeat();
+
+        return [
+            'message' => $response['content'],
+            'confidence' => $confidence,
+            'resolved' => $resolved,
+        ];
+    }
+
+    private function calculateConfidence(array $response): float
+    {
+        // Implement confidence calculation logic
+        // Could use token probabilities, response length, etc.
+        return 0.85;
+    }
+
+    private function detectResolution(string $message): bool
+    {
+        $resolutionIndicators = [
+            'issue is resolved',
+            'problem is fixed',
+            'anything else I can help',
+            'is there anything else',
+        ];
+
+        $lowerMessage = strtolower($message);
+        
+        foreach ($resolutionIndicators as $indicator) {
+            if (str_contains($lowerMessage, $indicator)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function loadKnowledgeBase(string $category): string
+    {
+        // Load relevant documentation and FAQs
+        return "Knowledge base content for {$category}...";
+    }
+}
+```
+
+### Analyze Sentiment Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Services\LlmService;
+use Workflow\Activity;
+
+class AnalyzeSentimentActivity extends Activity
+{
+    public int $tries = 3;
+
+    public function __construct(
+        private LlmService $llm
+    ) {}
+
+    public function execute(string $message): array
+    {
+        $response = $this->llm->complete([
+            'model' => 'gpt-3.5-turbo',
+            'messages' => [
+                [
+                    'role' => 'system',
+                    'content' => 'Analyze the sentiment: positive, neutral, negative, or very_negative',
+                ],
+                ['role' => 'user', 'content' => $message],
+            ],
+        ]);
+
+        return [
+            'sentiment' => strtolower(trim($response['content'])),
+        ];
+    }
+}
+```
+
+### Notify Human Agent Activity
+
+```php
+<?php
+
+namespace App\Activities;
+
+use App\Models\SupportAgent;
+use App\Notifications\TicketEscalated;
+use Workflow\Activity;
+
+class NotifyHumanAgentActivity extends Activity
+{
+    public function execute(string $ticketId, array $conversationHistory): void
+    {
+        // Find available support agent
+        $agent = SupportAgent::where('available', true)
+            ->orderBy('current_tickets_count')
+            ->first();
+
+        if ($agent) {
+            $agent->notify(new TicketEscalated(
+                $ticketId,
+                $conversationHistory
+            ));
+
+            $agent->increment('current_tickets_count');
+        }
+    }
+}
+```
+
+## Starting the AI Agent Workflow
+
+```php
+use App\Workflows\AiSupportAgentWorkflow;
+use Workflow\WorkflowStub;
+
+// Customer submits support ticket
+$workflow = WorkflowStub::make(AiSupportAgentWorkflow::class);
+
+$workflow->start(
+    ticketId: 'TICKET-12345',
+    initialMessage: 'I can\'t log into my account. I keep getting an error.',
+    customerId: 'CUST-67890'
+);
+
+// Store workflow ID with ticket
+$ticket->update(['workflow_id' => $workflow->id()]);
+```
+
+## Handling Customer Responses
+
+```php
+use Workflow\WorkflowStub;
+
+// When customer sends a follow-up message
+public function handleCustomerMessage(Request $request, Ticket $ticket)
+{
+    $workflow = WorkflowStub::load($ticket->workflow_id);
+    
+    $workflow->receiveMessage(
+        $request->input('message'),
+        $ticket->customer_id
+    );
+
+    // Poll for AI response
+    sleep(2);
+    $response = $workflow->getResponse();
+
+    return response()->json([
+        'message' => $response,
+    ]);
+}
+```
+
+## Manual Escalation
+
+```php
+// Support agent manually escalates
+public function escalateTicket(Ticket $ticket)
+{
+    $workflow = WorkflowStub::load($ticket->workflow_id);
+    
+    $workflow->escalateToHuman('Manual escalation requested');
+    $workflow->assignHumanAgent(auth()->id());
+
+    return redirect()->back()
+        ->with('success', 'Ticket escalated successfully');
+}
+```
+
+## Viewing Conversation History
+
+```php
+// Get full conversation for review
+public function viewConversation(Ticket $ticket)
+{
+    $workflow = WorkflowStub::load($ticket->workflow_id);
+    
+    $history = $workflow->getConversationHistory();
+
+    return view('tickets.conversation', [
+        'history' => $history,
+        'ticket' => $ticket,
+    ]);
+}
+```
+
+## Error Handling and Retries
+
+The workflow handles LLM API failures gracefully:
+
+### Automatic Retries
+
+```php
+public int $tries = 3;
+
+public function backoff()
+{
+    return [1, 5, 10]; // Retry after 1s, 5s, 10s
+}
+```
+
+### Fallback Responses
+
+```php
+try {
+    $response = yield activity(GenerateAiResponseActivity::class, ...);
+} catch (\Exception $e) {
+    // Fall back to template response
+    $response = yield activity(
+        GetTemplateResponseActivity::class,
+        $category
+    );
+}
+```
+
+## Monitoring AI Performance
+
+```php
+use App\Models\Ticket;
+use Workflow\WorkflowStub;
+
+// Get resolution metrics
+$tickets = Ticket::whereNotNull('workflow_id')
+    ->where('created_at', '>', now()->subDays(7))
+    ->get();
+
+foreach ($tickets as $ticket) {
+    $workflow = WorkflowStub::load($ticket->workflow_id);
+    
+    if ($workflow->completed()) {
+        $result = $workflow->output();
+        
+        echo "Ticket {$ticket->id}: {$result['status']}\n";
+        echo "Turns: {$result['turns']}\n";
+    }
+}
+```
+
+## Key Features
+
+- **Multi-turn Conversations**: Maintains context across multiple exchanges
+- **Automatic Escalation**: Escalates based on sentiment and confidence
+- **Human-in-the-Loop**: Seamless handoff to human agents
+- **LLM Retry Logic**: Automatic retries for API failures with backoff
+- **Timeout Handling**: Handles customer inactivity gracefully
+- **Conversation State**: Durable conversation history across restarts
+- **Confidence Scoring**: Evaluates AI response quality
+- **Knowledge Base Integration**: Uses RAG for accurate responses
+- **Real-time Updates**: Signal-based communication for instant updates

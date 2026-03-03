@@ -1,0 +1,241 @@
+---
+title: Database Configuration
+description: Set up database tables and schema for Durable Workflow
+---
+
+Durable Workflow persists workflow state, execution history, and metadata in your database. This enables durable execution that survives application restarts and failures.
+
+## Running Migrations
+
+After installing the package, run the migrations to create the required database tables:
+
+```bash
+php artisan migrate
+```
+
+This will create six tables in your database.
+
+## Database Tables
+
+### workflows Table
+
+Stores the main workflow instances and their current state.
+
+```php
+Schema::create('workflows', function (Blueprint $blueprint) {
+    $blueprint->id('id');
+    $blueprint->text('class');
+    $blueprint->text('arguments')->nullable();
+    $blueprint->text('output')->nullable();
+    $blueprint->string('status')->default('pending')->index();
+    $blueprint->timestamps(6);
+});
+```
+
+**Columns:**
+- `id` - Unique workflow instance identifier
+- `class` - Fully qualified workflow class name
+- `arguments` - Serialized workflow input arguments
+- `output` - Serialized workflow output/return value
+- `status` - Current workflow status (pending, running, completed, failed)
+- `created_at`, `updated_at` - Timestamps with microsecond precision
+
+### workflow_logs Table
+
+Records every activity execution for deterministic replay.
+
+```php
+Schema::create('workflow_logs', function (Blueprint $blueprint) {
+    $blueprint->id('id');
+    $blueprint->foreignId('stored_workflow_id')->index();
+    $blueprint->unsignedBigInteger('index');
+    $blueprint->timestamp('now', 6);
+    $blueprint->text('class');
+    $blueprint->text('result')->nullable();
+    $blueprint->timestamp('created_at', 6)->nullable();
+    $blueprint->unique(['stored_workflow_id', 'index']);
+    $blueprint->foreign('stored_workflow_id')
+        ->references('id')->on('workflows');
+});
+```
+
+**Columns:**
+- `id` - Unique log entry identifier
+- `stored_workflow_id` - Foreign key to workflows table
+- `index` - Execution order within the workflow
+- `now` - Timestamp of when the activity was executed
+- `class` - Activity class name
+- `result` - Serialized activity result
+- `created_at` - When the log entry was created
+
+### workflow_signals Table
+
+Stores external signals sent to workflows.
+
+```php
+Schema::create('workflow_signals', function (Blueprint $blueprint) {
+    $blueprint->id('id');
+    $blueprint->foreignId('stored_workflow_id')->index();
+    $blueprint->text('method');
+    $blueprint->text('arguments')->nullable();
+    $blueprint->timestamp('created_at', 6)->nullable();
+    $blueprint->index(['stored_workflow_id', 'created_at']);
+    $blueprint->foreign('stored_workflow_id')
+        ->references('id')->on('workflows');
+});
+```
+
+**Columns:**
+- `id` - Unique signal identifier
+- `stored_workflow_id` - Foreign key to workflows table
+- `method` - Signal method name
+- `arguments` - Serialized signal arguments
+- `created_at` - When the signal was received
+
+### workflow_timers Table
+
+Tracks scheduled timers and delays within workflows.
+
+```php
+Schema::create('workflow_timers', function (Blueprint $blueprint) {
+    $blueprint->id('id');
+    $blueprint->foreignId('stored_workflow_id')->index();
+    $blueprint->integer('index');
+    $blueprint->timestamp('stop_at', 6);
+    $blueprint->timestamp('created_at', 6)->nullable();
+    $blueprint->index(['stored_workflow_id', 'created_at']);
+    $blueprint->foreign('stored_workflow_id')
+        ->references('id')->on('workflows');
+});
+```
+
+**Columns:**
+- `id` - Unique timer identifier
+- `stored_workflow_id` - Foreign key to workflows table
+- `index` - Timer order within the workflow
+- `stop_at` - When the timer should fire
+- `created_at` - When the timer was created
+
+### workflow_exceptions Table
+
+Captures exceptions that occur during workflow execution.
+
+```php
+Schema::create('workflow_exceptions', function (Blueprint $blueprint) {
+    $blueprint->id('id');
+    $blueprint->foreignId('stored_workflow_id')->index();
+    $blueprint->text('class');
+    $blueprint->text('exception');
+    $blueprint->timestamp('created_at', 6)->nullable();
+    $blueprint->foreign('stored_workflow_id')
+        ->references('id')->on('workflows');
+});
+```
+
+**Columns:**
+- `id` - Unique exception identifier
+- `stored_workflow_id` - Foreign key to workflows table
+- `class` - Activity/workflow class where exception occurred
+- `exception` - Serialized exception details
+- `created_at` - When the exception occurred
+
+### workflow_relationships Table
+
+Tracks parent-child relationships between workflows.
+
+```php
+Schema::create('workflow_relationships', function (Blueprint $blueprint) {
+    $blueprint->id('id');
+    $blueprint->foreignId('parent_workflow_id')->nullable()->index();
+    $blueprint->unsignedBigInteger('parent_index');
+    $blueprint->timestamp('parent_now');
+    $blueprint->foreignId('child_workflow_id')->nullable()->index();
+    $blueprint->foreign('parent_workflow_id')
+        ->references('id')->on('workflows');
+    $blueprint->foreign('child_workflow_id')
+        ->references('id')->on('workflows');
+});
+```
+
+**Columns:**
+- `id` - Unique relationship identifier
+- `parent_workflow_id` - Foreign key to parent workflow
+- `parent_index` - Execution index in parent workflow
+- `parent_now` - Timestamp in parent workflow context
+- `child_workflow_id` - Foreign key to child workflow
+
+## Custom Model Configuration
+
+You can use custom Eloquent models by extending the base models and updating the configuration:
+
+```php
+// config/workflows.php
+return [
+    'stored_workflow_model' => App\Models\CustomWorkflow::class,
+    'stored_workflow_exception_model' => App\Models\CustomWorkflowException::class,
+    'stored_workflow_log_model' => App\Models\CustomWorkflowLog::class,
+    'stored_workflow_signal_model' => App\Models\CustomWorkflowSignal::class,
+    'stored_workflow_timer_model' => App\Models\CustomWorkflowTimer::class,
+];
+```
+
+## Custom Table Names
+
+The relationships table name can be customized:
+
+```php
+// config/workflows.php
+'workflow_relationships_table' => 'custom_workflow_relationships',
+```
+
+## Database Considerations
+
+<Note>
+  All timestamp columns use microsecond precision (6 decimal places) to ensure accurate ordering of events within workflows.
+</Note>
+
+<Warning>
+  The workflow_logs table can grow large over time. Consider implementing a pruning strategy for completed workflows using the `prune_age` configuration option.
+</Warning>
+
+### Indexes
+
+The migrations include strategic indexes for common queries:
+- Workflows by status
+- Logs by workflow and index
+- Signals by workflow and creation time
+- Timers by workflow and creation time
+- Exceptions by workflow
+- Relationships by parent and child workflows
+
+### Database Drivers
+
+Durable Workflow supports all Laravel-compatible database drivers:
+- MySQL 5.7+
+- PostgreSQL 10+
+- SQLite 3.8.8+
+- SQL Server 2017+
+
+## Data Pruning
+
+Configure automatic pruning of old workflow data:
+
+```php
+// config/workflows.php
+'prune_age' => '1 month',
+```
+
+Run the prune command:
+
+```bash
+php artisan workflow:prune
+```
+
+Schedule automatic pruning in `app/Console/Kernel.php`:
+
+```php
+protected function schedule(Schedule $schedule)
+{
+    $schedule->command('workflow:prune')->daily();
+}
+```

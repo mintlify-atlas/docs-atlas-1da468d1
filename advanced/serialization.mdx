@@ -1,0 +1,540 @@
+---
+title: 'Serialization'
+description: 'Understand how workflow data is serialized and stored'
+icon: 'box-archive'
+---
+
+## Overview
+
+Workflows serialize data for storage in the database, enabling replay and recovery. The package provides flexible serialization strategies that handle complex PHP objects, closures, and Eloquent models.
+
+## Default Serializer
+
+By default, the package uses the `Y` serializer, a custom encoding scheme optimized for database storage.
+
+**Configuration:**
+```php
+// config/workflows.php
+return [
+    'serializer' => \Workflow\Serializers\Y::class, // Default
+];
+```
+
+## Available Serializers
+
+### Y Serializer
+
+Custom encoding that escapes null bytes for safe database storage.
+
+**Location:** `src/Serializers/Y.php`
+
+**How it works** (from `src/Serializers/Y.php:23-37`):
+```php
+public static function encode(string $data): string
+{
+    return strtr($data, [
+        "\x00" => "\x01\x01",  // Escape null bytes
+        "\x01" => "\x01\x02",  // Escape escape character
+    ]);
+}
+
+public static function decode(string $data): string
+{
+    return strtr($data, [
+        "\x01\x01" => "\x00",  // Restore null bytes
+        "\x01\x02" => "\x01",  // Restore escape character
+    ]);
+}
+```
+
+**Use when:**
+- Default choice for most applications
+- Storing in databases with encoding constraints
+- Performance is important (fast encoding/decoding)
+
+### Base64 Serializer
+
+Base64 encoding for maximum compatibility.
+
+**Location:** `src/Serializers/Base64.php`
+
+**How it works** (from `src/Serializers/Base64.php:23-31`):
+```php
+public static function encode(string $data): string
+{
+    return 'base64:' . base64_encode($data);
+}
+
+public static function decode(string $data): string
+{
+    return base64_decode(substr($data, 7), true);
+}
+```
+
+**Use when:**
+- Storing in systems with strict character set requirements
+- Debugging (human-readable encoding)
+- Transmitting over text-only channels
+
+**Trade-offs:**
+- ~33% larger storage size
+- Slower encoding/decoding
+- Safe for any storage medium
+
+**Configuration:**
+```php
+return [
+    'serializer' => \Workflow\Serializers\Base64::class,
+];
+```
+
+## Serializer Interface
+
+All serializers implement `SerializerInterface` (from `src/Serializers/SerializerInterface.php:8-16`):
+
+```php
+interface SerializerInterface
+{
+    public static function encode(string $data): string;
+    public static function decode(string $data): string;
+    public static function serialize($data): string;
+    public static function unserialize(string $data);
+}
+```
+
+## What Gets Serialized
+
+The serialization system handles:
+
+### Primitive Types
+```php
+yield $this->myActivity(123);           // int
+yield $this->myActivity(45.67);         // float
+yield $this->myActivity('string');      // string
+yield $this->myActivity(true);          // bool
+yield $this->myActivity(null);          // null
+yield $this->myActivity([1, 2, 3]);     // array
+```
+
+### Eloquent Models
+
+From `src/Serializers/AbstractSerializer.php:31-48`, models are automatically serialized:
+
+```php
+$user = User::find(1);
+yield $this->sendEmail($user);
+
+// Serialized as:
+// ['class' => 'App\\Models\\User', 'id' => 1, 'relations' => [], ...]
+```
+
+Models are stored by reference (class + ID) and restored from the database on unserialization.
+
+### Closures
+
+From `src/Serializers/AbstractSerializer.php:60-75`, closures are wrapped in `SerializableClosure`:
+
+```php
+$callback = function ($result) {
+    return $result * 2;
+};
+
+yield $this->processData($callback);
+```
+
+**Important:** Closures must be serializable (no references to resources, etc.).
+
+### Collections
+
+```php
+$items = collect([1, 2, 3]);
+yield $this->processItems($items);
+```
+
+### DateTime Objects
+
+```php
+$date = now();
+yield $this->scheduleTask($date);
+```
+
+### Complex Nested Data
+
+```php
+$data = [
+    'user' => User::find(1),
+    'items' => Product::whereIn('id', [1, 2, 3])->get(),
+    'callback' => fn($x) => $x * 2,
+    'metadata' => [
+        'timestamp' => now(),
+        'count' => 42,
+    ],
+];
+
+yield $this->process($data);
+```
+
+## Serialization Process
+
+From `src/Serializers/AbstractSerializer.php:60-75`, the full serialization flow:
+
+```php
+public static function serialize($data): string
+{
+    // 1. Set encryption key
+    SerializableClosure::setSecretKey(config('app.key'));
+    
+    // 2. Serialize Eloquent models to references
+    $data = static::serializeModels($data);
+    
+    // 3. Wrap in SerializableClosure for closure support
+    $wrapped = new SerializableClosure(static fn () => $data);
+    
+    // 4. PHP serialize
+    $serialized = serialize($wrapped);
+    
+    // 5. Encode for storage
+    return static::encode($serialized);
+}
+```
+
+## Deserialization Process
+
+From `src/Serializers/AbstractSerializer.php:67-75`, unserialization:
+
+```php
+public static function unserialize(string $data)
+{
+    // 1. Set encryption key
+    SerializableClosure::setSecretKey(config('app.key'));
+    
+    // 2. Decode from storage format
+    $decoded = static::decode($data);
+    
+    // 3. PHP unserialize
+    $unserialized = unserialize($decoded);
+    
+    // 4. Unwrap SerializableClosure
+    if ($unserialized instanceof SerializableClosure) {
+        $unserialized = ($unserialized->getClosure())();
+    }
+    
+    // 5. Restore Eloquent models from database
+    return static::unserializeModels($unserialized);
+}
+```
+
+## Automatic Serialization
+
+The `Serializer` facade (from `src/Serializers/Serializer.php:8-25`) automatically detects the format:
+
+```php
+// Serialize with configured serializer
+$encoded = Serializer::serialize($data);
+
+// Deserialize - auto-detects format
+if (str_starts_with($encoded, 'base64:')) {
+    $decoded = Base64::unserialize($encoded);
+} else {
+    $decoded = Y::unserialize($encoded);
+}
+```
+
+## Custom Serializer
+
+Create a custom serializer:
+
+```php
+namespace App\Workflow\Serializers;
+
+use Workflow\Serializers\AbstractSerializer;
+
+class JsonSerializer extends AbstractSerializer
+{
+    private static ?self $instance = null;
+
+    public static function getInstance(): self
+    {
+        if (self::$instance === null) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+
+    public static function encode(string $data): string
+    {
+        // Compress with gzip
+        return 'gz:' . base64_encode(gzencode($data, 9));
+    }
+
+    public static function decode(string $data): string
+    {
+        // Decompress
+        return gzdecode(base64_decode(substr($data, 3)));
+    }
+}
+```
+
+**Configuration:**
+```php
+return [
+    'serializer' => \App\Workflow\Serializers\JsonSerializer::class,
+];
+```
+
+## Model Serialization Details
+
+From `src/Serializers/AbstractSerializer.php:31-58`, Eloquent models:
+
+### Serialization
+
+```php
+public static function serializeModels($data)
+{
+    if (is_array($data)) {
+        $self = static::getInstance();
+        $data = $self->serializeValue($data); // Recursively serialize
+    } elseif ($data instanceof Throwable) {
+        // Special handling for exceptions
+        $data = [
+            'class' => get_class($data),
+            'message' => $data->getMessage(),
+            'code' => $data->getCode(),
+            // ...
+        ];
+    }
+    return $data;
+}
+```
+
+### What's Stored
+
+For an Eloquent model:
+```php
+$user = User::find(1);
+
+// Stored as:
+[
+    '__class__' => 'App\\Models\\User',
+    'key' => 1,
+    'connection' => 'mysql',
+]
+```
+
+### Restoration
+
+On unserialization, models are fresh instances from the database:
+
+```php
+// During workflow replay
+$user = User::on('mysql')->find(1); // Fresh from DB
+```
+
+**Important:** Changes to the model since serialization are reflected!
+
+## Serialization Limits
+
+### Unserializable Types
+
+Some types cannot be serialized:
+
+```php
+// ❌ Resources
+$file = fopen('file.txt', 'r');
+yield $this->process($file); // Will fail
+
+// ❌ Closures with external references
+$api = new ApiClient();
+$callback = fn() => $api->call(); // $api reference will fail
+yield $this->process($callback);
+
+// ✅ Self-contained closures
+$callback = fn($x) => $x * 2; // OK
+yield $this->process($callback);
+```
+
+### Testing Serializability
+
+From `src/Serializers/AbstractSerializer.php:21-29`:
+
+```php
+public static function serializable($data): bool
+{
+    try {
+        serialize($data);
+        return true;
+    } catch (\Throwable $th) {
+        return false;
+    }
+}
+```
+
+**Usage:**
+```php
+if (Serializer::serializable($data)) {
+    yield $this->process($data);
+} else {
+    throw new \Exception('Data cannot be serialized');
+}
+```
+
+## Storage Considerations
+
+### Database Column Type
+
+Ensure sufficient storage:
+
+```php
+// Migration
+Schema::create('workflow_logs', function (Blueprint $table) {
+    $table->id();
+    $table->longText('result'); // Large enough for serialized data
+    // ...
+});
+```
+
+### Size Optimization
+
+```php
+// ❌ Bad - stores large models
+$users = User::with('posts', 'comments', 'roles')->get();
+yield $this->processUsers($users); // Huge serialized size!
+
+// ✅ Good - store IDs only
+$userIds = User::pluck('id');
+yield $this->processUsers($userIds);
+
+// In activity
+public function execute($userIds)
+{
+    $users = User::whereIn('id', $userIds)->get();
+    // Process users
+}
+```
+
+### Security
+
+From `src/Serializers/AbstractSerializer.php:62,69`, closures are encrypted:
+
+```php
+SerializableClosure::setSecretKey(config('app.key'));
+```
+
+**Important:** Use a strong `APP_KEY` to prevent tampering.
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Minimize Serialized Data">
+    Store minimal data in workflow state:
+    ```php
+    // ❌ Bad
+    $order = Order::with('items', 'customer', 'payments')->find($id);
+    yield $this->process($order);
+    
+    // ✅ Good
+    yield $this->process($orderId);
+    ```
+  </Accordion>
+
+  <Accordion title="Use Model References">
+    Let the serializer handle models:
+    ```php
+    // ✅ Good - automatic serialization
+    $user = User::find($userId);
+    yield $this->sendEmail($user);
+    
+    // ❌ Unnecessary - don't manually convert
+    yield $this->sendEmail($user->toArray());
+    ```
+  </Accordion>
+
+  <Accordion title="Avoid External References in Closures">
+    ```php
+    // ❌ Bad
+    $config = $this->config;
+    $callback = fn($data) => $this->process($data, $config);
+    
+    // ✅ Good
+    $callback = fn($data) => $this->process($data, config('app.setting'));
+    ```
+  </Accordion>
+
+  <Accordion title="Test Serialization">
+    ```php
+    public function test_workflow_data_is_serializable()
+    {
+        $data = [
+            'user' => User::factory()->create(),
+            'items' => Product::factory()->count(3)->create(),
+        ];
+        
+        $serialized = Serializer::serialize($data);
+        $unserialized = Serializer::unserialize($serialized);
+        
+        $this->assertEquals($data['user']->id, $unserialized['user']->id);
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Debugging Serialization Issues
+
+```php
+try {
+    $encoded = Serializer::serialize($data);
+} catch (\Exception $e) {
+    // Find what can't be serialized
+    foreach ($data as $key => $value) {
+        try {
+            serialize($value);
+        } catch (\Exception $e2) {
+            Log::error("Cannot serialize key: {$key}", [
+                'type' => gettype($value),
+                'error' => $e2->getMessage(),
+            ]);
+        }
+    }
+    
+    throw $e;
+}
+```
+
+## Performance Considerations
+
+### Serialization Speed
+
+```php
+// Y serializer (fastest)
+$start = microtime(true);
+$encoded = Y::getInstance()->serialize($data);
+$yTime = microtime(true) - $start;
+
+// Base64 serializer (slower)
+$start = microtime(true);
+$encoded = Base64::getInstance()->serialize($data);
+$base64Time = microtime(true) - $start;
+
+// Base64 is typically 1.5-2x slower
+```
+
+### Storage Size
+
+```php
+// Y encoding
+$yEncoded = Y::getInstance()->serialize($data);
+$ySize = strlen($yEncoded);
+
+// Base64 encoding
+$base64Encoded = Base64::getInstance()->serialize($data);
+$base64Size = strlen($base64Encoded);
+
+// Base64 is ~33% larger
+```
+
+## Related Topics
+
+- [Durability](/concepts/durability) - How workflows are stored
+- [Activities](/concepts/activities) - Activity data handling  
+- [Error Handling](/advanced/error-handling) - Serializing exceptions
+- [Configuration](/configuration/overview) - Serializer configuration

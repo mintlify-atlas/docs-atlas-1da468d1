@@ -1,0 +1,610 @@
+---
+title: 'Webhook Authentication'
+description: 'Secure your workflow webhooks with built-in authentication methods'
+icon: 'shield-check'
+---
+
+## Overview
+
+Webhook authentication protects your workflow endpoints from unauthorized access. The package provides multiple authentication strategies out of the box.
+
+## Configuration
+
+All authentication settings are in `config/workflows.php`:
+
+```php
+return [
+    'webhook_auth' => [
+        'method' => 'signature', // none, token, signature, custom
+        
+        // Method-specific configuration
+        'token' => [...],
+        'signature' => [...],
+        'custom' => [...],
+    ],
+];
+```
+
+## Authentication Methods
+
+### None (Development Only)
+
+<Warning>
+  **Never use in production.** This disables authentication completely.
+</Warning>
+
+```php
+return [
+    'webhook_auth' => [
+        'method' => 'none',
+    ],
+];
+```
+
+The `NullAuthenticator` (from `src/Auth/NullAuthenticator.php:11-14`) simply returns the request without validation.
+
+**Use case:** Local development and testing only.
+
+### Token-Based Authentication
+
+The simplest authentication method using a shared secret token.
+
+**Configuration:**
+```php
+return [
+    'webhook_auth' => [
+        'method' => 'token',
+        'token' => [
+            'header' => 'X-Workflow-Token',
+            'token' => env('WORKFLOW_WEBHOOK_TOKEN'),
+        ],
+    ],
+];
+```
+
+**Environment:**
+```bash
+# .env
+WORKFLOW_WEBHOOK_TOKEN=your-secret-token-here-make-it-long-and-random
+```
+
+**Making Requests:**
+```bash
+curl -X POST https://yourapp.com/webhooks/start/order-workflow \
+  -H "X-Workflow-Token: your-secret-token-here-make-it-long-and-random" \
+  -H "Content-Type: application/json" \
+  -d '{"orderId": "123"}'
+```
+
+**How It Works** (from `src/Auth/TokenAuthenticator.php:12-18`):
+
+1. Extracts token from request header
+2. Compares with configured token using `hash_equals()`
+3. Returns 401 if tokens don't match
+
+**Security Features:**
+- Timing-safe comparison prevents timing attacks
+- Simple to implement
+- Works with any HTTP client
+
+**Limitations:**
+- Token must be shared with webhook callers
+- Single token for all webhooks
+- No per-caller authentication
+
+### HMAC Signature Authentication
+
+The most secure method, using HMAC-SHA256 signatures. Ideal for integrations with third-party services.
+
+**Configuration:**
+```php
+return [
+    'webhook_auth' => [
+        'method' => 'signature',
+        'signature' => [
+            'header' => 'X-Signature',
+            'secret' => env('WEBHOOK_SIGNING_SECRET'),
+        ],
+    ],
+];
+```
+
+**Environment:**
+```bash
+# .env
+WEBHOOK_SIGNING_SECRET=your-signing-secret-here
+```
+
+**How It Works** (from `src/Auth/SignatureAuthenticator.php:13-16`):
+
+1. Server computes HMAC-SHA256 of raw request body using secret
+2. Compares computed signature with signature from header
+3. Uses timing-safe comparison (`hash_equals()`)
+4. Returns 401 if signatures don't match
+
+```php
+// The server does this:
+$expectedSignature = hash_hmac('sha256', $requestBody, $secret);
+$providedSignature = $request->header('X-Signature');
+
+if (!hash_equals($expectedSignature, $providedSignature)) {
+    abort(401);
+}
+```
+
+**Making Requests (PHP):**
+```php
+$payload = json_encode(['orderId' => '123']);
+$signature = hash_hmac('sha256', $payload, $secret);
+
+$response = Http::withHeaders([
+    'X-Signature' => $signature,
+    'Content-Type' => 'application/json',
+])->post('https://yourapp.com/webhooks/start/order-workflow', $payload);
+```
+
+**Making Requests (JavaScript):**
+```javascript
+const crypto = require('crypto');
+
+const payload = JSON.stringify({ orderId: '123' });
+const signature = crypto
+  .createHmac('sha256', process.env.WEBHOOK_SIGNING_SECRET)
+  .update(payload)
+  .digest('hex');
+
+fetch('https://yourapp.com/webhooks/start/order-workflow', {
+  method: 'POST',
+  headers: {
+    'X-Signature': signature,
+    'Content-Type': 'application/json',
+  },
+  body: payload,
+});
+```
+
+**Making Requests (Python):**
+```python
+import hmac
+import hashlib
+import json
+import requests
+
+payload = json.dumps({'orderId': '123'})
+signature = hmac.new(
+    secret.encode('utf-8'),
+    payload.encode('utf-8'),
+    hashlib.sha256
+).hexdigest()
+
+requests.post(
+    'https://yourapp.com/webhooks/start/order-workflow',
+    headers={
+        'X-Signature': signature,
+        'Content-Type': 'application/json',
+    },
+    data=payload
+)
+```
+
+**Security Features:**
+- Request body integrity verification
+- Prevents replay attacks (when combined with timestamps)
+- No secrets transmitted in requests
+- Industry-standard approach
+
+**Best Practices:**
+
+<AccordionGroup>
+  <Accordion title="Use Strong Secrets">
+    Generate cryptographically secure secrets:
+    ```bash
+    # Laravel
+    php artisan tinker
+    >>> Str::random(64)
+    
+    # OpenSSL
+    openssl rand -hex 32
+    
+    # Node.js
+    node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+    ```
+  </Accordion>
+
+  <Accordion title="Add Timestamp Validation">
+    Prevent replay attacks by including timestamps:
+    ```php
+    class TimestampSignatureAuthenticator implements WebhookAuthenticator
+    {
+        public function validate(Request $request): Request
+        {
+            $timestamp = $request->header('X-Timestamp');
+            $signature = $request->header('X-Signature');
+            
+            // Reject old requests (5 minute window)
+            if (abs(time() - $timestamp) > 300) {
+                abort(401, 'Request too old');
+            }
+            
+            // Verify signature includes timestamp
+            $payload = $timestamp . '.' . $request->getContent();
+            $expected = hash_hmac('sha256', $payload, $this->secret);
+            
+            if (!hash_equals($expected, $signature)) {
+                abort(401, 'Invalid signature');
+            }
+            
+            return $request;
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Customize Header Names">
+    Match third-party webhook formats:
+    ```php
+    // For Stripe
+    'signature' => [
+        'header' => 'Stripe-Signature',
+        'secret' => env('STRIPE_WEBHOOK_SECRET'),
+    ],
+    
+    // For GitHub
+    'signature' => [
+        'header' => 'X-Hub-Signature-256',
+        'secret' => env('GITHUB_WEBHOOK_SECRET'),
+    ],
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Custom Authentication
+
+Implement any authentication strategy by creating a custom authenticator.
+
+**Interface:**
+```php
+namespace Workflow\Auth;
+
+use Illuminate\Http\Request;
+
+interface WebhookAuthenticator
+{
+    public function validate(Request $request): Request;
+}
+```
+
+**Example: API Key Authentication**
+
+```php
+namespace App\Auth;
+
+use Workflow\Auth\WebhookAuthenticator;
+use Illuminate\Http\Request;
+use App\Models\ApiKey;
+
+class ApiKeyAuthenticator implements WebhookAuthenticator
+{
+    public function validate(Request $request): Request
+    {
+        $apiKey = $request->header('X-API-Key');
+        
+        if (empty($apiKey)) {
+            abort(401, 'API key required');
+        }
+        
+        $key = ApiKey::where('key', hash('sha256', $apiKey))
+            ->where('active', true)
+            ->where('expires_at', '>', now())
+            ->first();
+        
+        if (!$key) {
+            abort(401, 'Invalid API key');
+        }
+        
+        // Log usage
+        $key->increment('usage_count');
+        $key->touch('last_used_at');
+        
+        // Attach key to request for later use
+        $request->attributes->set('api_key', $key);
+        
+        return $request;
+    }
+}
+```
+
+**Configuration:**
+```php
+return [
+    'webhook_auth' => [
+        'method' => 'custom',
+        'custom' => [
+            'class' => \App\Auth\ApiKeyAuthenticator::class,
+        ],
+    ],
+];
+```
+
+**Example: OAuth2 Bearer Token**
+
+```php
+class OAuth2Authenticator implements WebhookAuthenticator
+{
+    public function validate(Request $request): Request
+    {
+        $token = $request->bearerToken();
+        
+        if (!$token) {
+            abort(401, 'Bearer token required');
+        }
+        
+        try {
+            $decoded = JWT::decode($token, $this->publicKey, ['RS256']);
+            
+            // Validate claims
+            if ($decoded->exp < time()) {
+                abort(401, 'Token expired');
+            }
+            
+            if (!in_array('workflow:execute', $decoded->scope)) {
+                abort(403, 'Insufficient permissions');
+            }
+            
+            $request->attributes->set('user_id', $decoded->sub);
+            
+        } catch (\Exception $e) {
+            abort(401, 'Invalid token');
+        }
+        
+        return $request;
+    }
+}
+```
+
+**Example: IP Allowlisting**
+
+```php
+class IpAllowlistAuthenticator implements WebhookAuthenticator
+{
+    private array $allowedIps;
+    
+    public function __construct()
+    {
+        $this->allowedIps = config('workflows.webhook_auth.custom.allowed_ips', []);
+    }
+    
+    public function validate(Request $request): Request
+    {
+        $ip = $request->ip();
+        
+        if (!in_array($ip, $this->allowedIps)) {
+            Log::warning('Webhook request from unauthorized IP', [
+                'ip' => $ip,
+                'path' => $request->path(),
+            ]);
+            
+            abort(403, 'IP not allowed');
+        }
+        
+        return $request;
+    }
+}
+```
+
+**Example: Multi-Factor Authentication**
+
+Combine multiple authentication methods:
+
+```php
+class MultiFactorAuthenticator implements WebhookAuthenticator
+{
+    public function validate(Request $request): Request
+    {
+        // Require both token AND signature
+        $this->validateToken($request);
+        $this->validateSignature($request);
+        $this->validateIp($request);
+        
+        return $request;
+    }
+    
+    private function validateToken(Request $request): void
+    {
+        $token = $request->header('X-API-Token');
+        if (!hash_equals(config('workflows.api_token'), $token)) {
+            abort(401, 'Invalid token');
+        }
+    }
+    
+    private function validateSignature(Request $request): void
+    {
+        $signature = $request->header('X-Signature');
+        $expected = hash_hmac('sha256', $request->getContent(), config('workflows.signing_secret'));
+        if (!hash_equals($expected, $signature)) {
+            abort(401, 'Invalid signature');
+        }
+    }
+    
+    private function validateIp(Request $request): void
+    {
+        $allowedIps = ['192.168.1.1', '10.0.0.1'];
+        if (!in_array($request->ip(), $allowedIps)) {
+            abort(403, 'IP not allowed');
+        }
+    }
+}
+```
+
+## How Authentication Works
+
+From the source code at `src/Webhooks.php:155-170`, the authentication flow:
+
+1. **Route Handler**: Every webhook route calls `validateAuth()`
+2. **Method Matching**: Configuration determines which authenticator to use
+3. **Instantiation**: The appropriate authenticator class is instantiated
+4. **Validation**: The `validate()` method is called with the request
+5. **Success**: Request continues to workflow execution
+6. **Failure**: 401 response returned immediately
+
+```php
+private static function validateAuth(Request $request): Request
+{
+    $authenticatorClass = match (config('workflows.webhook_auth.method')) {
+        'none' => NullAuthenticator::class,
+        'signature' => SignatureAuthenticator::class,
+        'token' => TokenAuthenticator::class,
+        'custom' => config('workflows.webhook_auth.custom.class'),
+        default => null,
+    };
+
+    if (!is_subclass_of($authenticatorClass, WebhookAuthenticator::class)) {
+        abort(401, 'Unauthorized');
+    }
+
+    return (new $authenticatorClass())->validate($request);
+}
+```
+
+## Testing Authentication
+
+```php
+use Illuminate\Foundation\Testing\RefreshDatabase;
+
+class WebhookAuthenticationTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_token_authentication_success()
+    {
+        config(['workflows.webhook_auth.method' => 'token']);
+        config(['workflows.webhook_auth.token.token' => 'secret123']);
+
+        $response = $this->postJson(
+            '/webhooks/start/order-workflow',
+            ['orderId' => '123'],
+            ['X-Workflow-Token' => 'secret123']
+        );
+
+        $response->assertStatus(200);
+    }
+
+    public function test_token_authentication_failure()
+    {
+        config(['workflows.webhook_auth.method' => 'token']);
+        config(['workflows.webhook_auth.token.token' => 'secret123']);
+
+        $response = $this->postJson(
+            '/webhooks/start/order-workflow',
+            ['orderId' => '123'],
+            ['X-Workflow-Token' => 'wrong-token']
+        );
+
+        $response->assertStatus(401);
+    }
+
+    public function test_signature_authentication()
+    {
+        config(['workflows.webhook_auth.method' => 'signature']);
+        config(['workflows.webhook_auth.signature.secret' => 'my-secret']);
+
+        $payload = json_encode(['orderId' => '123']);
+        $signature = hash_hmac('sha256', $payload, 'my-secret');
+
+        $response = $this->postJson(
+            '/webhooks/start/order-workflow',
+            json_decode($payload, true),
+            ['X-Signature' => $signature]
+        );
+
+        $response->assertStatus(200);
+    }
+
+    public function test_custom_authenticator()
+    {
+        config(['workflows.webhook_auth.method' => 'custom']);
+        config(['workflows.webhook_auth.custom.class' => TestAuthenticator::class]);
+
+        $response = $this->postJson(
+            '/webhooks/start/order-workflow',
+            ['orderId' => '123'],
+            ['X-Custom-Auth' => 'valid']
+        );
+
+        $response->assertStatus(200);
+    }
+}
+```
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use HTTPS" icon="lock">
+    Always use HTTPS in production to prevent credential interception.
+  </Card>
+  
+  <Card title="Rotate Secrets" icon="rotate">
+    Regularly rotate authentication secrets and signing keys.
+  </Card>
+  
+  <Card title="Rate Limiting" icon="gauge">
+    Apply rate limiting to prevent brute force attacks.
+  </Card>
+  
+  <Card title="Logging" icon="file-lines">
+    Log all authentication failures for security monitoring.
+  </Card>
+</CardGroup>
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="401 Unauthorized with correct token">
+    **Cause:** Header name mismatch or whitespace in token.
+    
+    **Solution:**
+    ```php
+    // Check exact header name
+    config('workflows.webhook_auth.token.header'); // 'X-Workflow-Token'
+    
+    // Trim whitespace
+    $token = trim(env('WORKFLOW_WEBHOOK_TOKEN'));
+    ```
+  </Accordion>
+
+  <Accordion title="Signature validation fails">
+    **Cause:** Request body modified or encoding issues.
+    
+    **Solution:**
+    - Sign the raw request body (before JSON encoding)
+    - Use exact same encoding (UTF-8)
+    - Don't modify body between signing and sending
+    ```php
+    // Correct
+    $body = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $signature = hash_hmac('sha256', $body, $secret);
+    ```
+  </Accordion>
+
+  <Accordion title="Custom authenticator not loading">
+    **Cause:** Class doesn't implement `WebhookAuthenticator` interface.
+    
+    **Solution:**
+    ```php
+    use Workflow\Auth\WebhookAuthenticator;
+    
+    class MyAuthenticator implements WebhookAuthenticator
+    {
+        public function validate(Request $request): Request
+        {
+            // Implementation
+        }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Related Topics
+
+- [Webhooks](/advanced/webhooks) - Setting up webhook endpoints
+- [Configuration](/configuration/overview) - Workflow configuration options

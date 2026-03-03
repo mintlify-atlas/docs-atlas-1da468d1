@@ -1,0 +1,365 @@
+---
+title: StoredWorkflow
+description: The main model for storing workflow execution state and history
+---
+
+The `StoredWorkflow` model represents a workflow instance in the database. It stores the workflow's class, arguments, output, and execution status.
+
+## Database Table
+
+**Table:** `workflows`
+
+## Model Attributes
+
+<ResponseField name="id" type="integer" required>
+  Primary key for the workflow instance
+</ResponseField>
+
+<ResponseField name="class" type="string" required>
+  Fully qualified class name of the workflow (e.g., `App\Workflows\MyWorkflow`)
+</ResponseField>
+
+<ResponseField name="arguments" type="string" nullable>
+  Serialized workflow arguments passed during workflow creation
+</ResponseField>
+
+<ResponseField name="output" type="string" nullable>
+  Serialized output/result of the workflow execution
+</ResponseField>
+
+<ResponseField name="status" type="WorkflowStatus" required>
+  Current status of the workflow. Possible values:
+  - `pending` - Workflow is queued for execution
+  - `running` - Workflow is currently executing
+  - `completed` - Workflow finished successfully
+  - `failed` - Workflow encountered an error
+  - `continued` - Workflow has been continued with ContinueAsNew
+  
+  Default: `pending`
+</ResponseField>
+
+<ResponseField name="created_at" type="timestamp" required>
+  When the workflow was created (microsecond precision)
+</ResponseField>
+
+<ResponseField name="updated_at" type="timestamp" required>
+  When the workflow was last updated (microsecond precision)
+</ResponseField>
+
+## Relationships
+
+### logs()
+
+Returns all activity execution logs for this workflow, ordered by ID.
+
+```php
+public function logs(): HasMany
+```
+
+**Returns:** `HasMany` relationship to [StoredWorkflowLog](/api/models/stored-workflow-log)
+
+### exceptions()
+
+Returns all exceptions that occurred during workflow execution.
+
+```php
+public function exceptions(): HasMany
+```
+
+**Returns:** `HasMany` relationship to [StoredWorkflowException](/api/models/stored-workflow-exception)
+
+### signals()
+
+Returns all signals sent to this workflow.
+
+```php
+public function signals(): HasMany
+```
+
+**Returns:** `HasMany` relationship to `StoredWorkflowSignal`
+
+### timers()
+
+Returns all timers created by this workflow.
+
+```php
+public function timers(): HasMany
+```
+
+**Returns:** `HasMany` relationship to `StoredWorkflowTimer`
+
+### parents()
+
+Returns parent workflows that spawned this workflow as a child.
+
+```php
+public function parents(): BelongsToMany
+```
+
+**Returns:** `BelongsToMany` relationship to `StoredWorkflow`
+
+**Pivot fields:**
+- `parent_index` - The activity index in the parent workflow
+- `parent_now` - The timestamp when the child was created
+
+### children()
+
+Returns child workflows spawned by this workflow.
+
+```php
+public function children(): BelongsToMany
+```
+
+**Returns:** `BelongsToMany` relationship to `StoredWorkflow`
+
+**Pivot fields:**
+- `parent_index` - The activity index in the parent workflow
+- `parent_now` - The timestamp when the child was created
+
+### continuedWorkflows()
+
+Returns workflows that were created via ContinueAsNew from this workflow.
+
+```php
+public function continuedWorkflows(): BelongsToMany
+```
+
+**Returns:** `BelongsToMany` relationship to `StoredWorkflow` where `parent_index` equals `StoredWorkflow::CONTINUE_PARENT_INDEX`
+
+### activeWorkflow()
+
+Returns the current active workflow in a continuation chain.
+
+```php
+public function activeWorkflow(): BelongsToMany
+```
+
+**Returns:** `BelongsToMany` relationship to `StoredWorkflow` where `parent_index` equals `StoredWorkflow::ACTIVE_WORKFLOW_INDEX`
+
+## Important Methods
+
+### toWorkflow()
+
+Converts the stored workflow back into a `WorkflowStub` instance.
+
+```php
+public function toWorkflow(): WorkflowStub
+```
+
+### workflowMetadata()
+
+Returns the workflow metadata containing arguments and options.
+
+```php
+public function workflowMetadata(): WorkflowMetadata
+```
+
+### workflowArguments()
+
+Returns the unserialized workflow arguments.
+
+```php
+public function workflowArguments(): array
+```
+
+### workflowOptions()
+
+Returns the workflow execution options.
+
+```php
+public function workflowOptions(): WorkflowOptions
+```
+
+### effectiveConnection()
+
+Returns the queue connection that should be used for this workflow.
+
+```php
+public function effectiveConnection(): ?string
+```
+
+### effectiveQueue()
+
+Returns the queue name that should be used for this workflow.
+
+```php
+public function effectiveQueue(): ?string
+```
+
+### findLogByIndex()
+
+Finds a log entry by its index number.
+
+```php
+public function findLogByIndex(int $index, bool $fresh = false): ?StoredWorkflowLog
+```
+
+**Parameters:**
+- `$index` - The activity index to find
+- `$fresh` - Whether to query the database instead of using loaded relations
+
+**Returns:** The log entry or `null` if not found
+
+### hasLogByIndex()
+
+Checks if a log entry exists for a given index.
+
+```php
+public function hasLogByIndex(int $index): bool
+```
+
+### createLog()
+
+Creates a new log entry for this workflow.
+
+```php
+public function createLog(array $attributes): StoredWorkflowLog
+```
+
+### findTimerByIndex()
+
+Finds a timer by its index number.
+
+```php
+public function findTimerByIndex(int $index): ?StoredWorkflowTimer
+```
+
+### createTimer()
+
+Creates a new timer for this workflow.
+
+```php
+public function createTimer(array $attributes): StoredWorkflowTimer
+```
+
+### orderedSignals()
+
+Returns signals ordered by creation time.
+
+```php
+public function orderedSignals(): Collection
+```
+
+### active()
+
+Returns the currently active workflow instance. If the workflow has been continued, returns the continuation.
+
+```php
+public function active(): StoredWorkflow
+```
+
+### prunable()
+
+Defines which workflows are eligible for automatic pruning.
+
+```php
+public function prunable(): Builder
+```
+
+Workflows are prunable if they:
+- Have status `completed`
+- Were created before the configured `prune_age` (default: 1 month)
+- Have no parent workflows
+
+## Querying Workflow History
+
+### Get all completed workflows
+
+```php
+use Workflow\Models\StoredWorkflow;
+
+$completedWorkflows = StoredWorkflow::where('status', 'completed')
+    ->orderBy('created_at', 'desc')
+    ->get();
+```
+
+### Get workflow with all logs
+
+```php
+$workflow = StoredWorkflow::with('logs')
+    ->find($workflowId);
+
+foreach ($workflow->logs as $log) {
+    echo "Activity: {$log->class} at {$log->now}\n";
+}
+```
+
+### Get workflow with exceptions
+
+```php
+$workflow = StoredWorkflow::with('exceptions')
+    ->find($workflowId);
+
+if ($workflow->exceptions->isNotEmpty()) {
+    foreach ($workflow->exceptions as $exception) {
+        echo "Error: {$exception->exception}\n";
+    }
+}
+```
+
+### Get workflows by class
+
+```php
+$myWorkflows = StoredWorkflow::where('class', 'App\\Workflows\\ProcessOrder')
+    ->where('status', 'running')
+    ->get();
+```
+
+### Get child workflows
+
+```php
+$workflow = StoredWorkflow::with('children')->find($workflowId);
+
+foreach ($workflow->children as $child) {
+    echo "Child workflow: {$child->class} (Status: {$child->status})\n";
+}
+```
+
+### Get workflow continuation chain
+
+```php
+$workflow = StoredWorkflow::with('continuedWorkflows')->find($workflowId);
+
+foreach ($workflow->continuedWorkflows as $continuation) {
+    echo "Continued as: {$continuation->id}\n";
+}
+```
+
+### Find the active workflow in a continuation chain
+
+```php
+$workflow = StoredWorkflow::find($workflowId);
+$activeWorkflow = $workflow->active();
+
+echo "Active workflow ID: {$activeWorkflow->id}\n";
+echo "Status: {$activeWorkflow->status}\n";
+```
+
+## Configuration
+
+The model class can be customized in `config/workflows.php`:
+
+```php
+'stored_workflow_model' => Workflow\Models\StoredWorkflow::class,
+```
+
+## Constants
+
+<ResponseField name="CONTINUE_PARENT_INDEX" type="int">
+  Special parent index value (`PHP_INT_MAX`) used to mark workflow continuation relationships
+</ResponseField>
+
+<ResponseField name="ACTIVE_WORKFLOW_INDEX" type="int">
+  Special parent index value (`PHP_INT_MAX - 1`) used to mark the active workflow in a continuation chain
+</ResponseField>
+
+## Traits
+
+- **HasStates** - Provides state management functionality for workflow status
+- **Prunable** - Enables automatic cleanup of old completed workflows
+
+## See Also
+
+- [StoredWorkflowLog](/api/models/stored-workflow-log) - Activity execution logs
+- [StoredWorkflowException](/api/models/stored-workflow-exception) - Workflow exceptions
+- [WorkflowStub](/api/workflow-stub) - Workflow instance interface

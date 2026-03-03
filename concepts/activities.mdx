@@ -1,0 +1,362 @@
+---
+title: Activities
+description: Learn how activities execute side effects and non-deterministic operations in your workflows
+---
+
+## Overview
+
+Activities are the way you execute side effects in Durable Workflow. Unlike workflows, which must be deterministic, activities can perform non-deterministic operations like:
+
+- Making HTTP requests
+- Reading from databases
+- Sending emails
+- Calling third-party APIs
+- Generating random values
+- Any operation with external dependencies
+
+Activities are executed as separate jobs on your queue and automatically retry on failure.
+
+## The Activity Base Class
+
+Every activity extends the `Activity` class and implements an `execute()` method:
+
+```php
+use Workflow\Activity;
+
+class ProcessPayment extends Activity
+{
+    public function execute($orderId, $amount)
+    {
+        // Execute side effects here
+        $result = PaymentGateway::charge($orderId, $amount);
+        
+        return $result;
+    }
+}
+```
+
+### Activity Constructor
+
+Activities are constructed with context information from the workflow:
+
+```php src/Activity.php
+public function __construct(
+    public int $index,
+    public string $now,
+    public StoredWorkflow $storedWorkflow,
+    ...$arguments
+) {
+    $this->arguments = $arguments;
+    // Queue configuration from workflow options
+    $options = $this->storedWorkflow->workflowOptions();
+    $connection = $options->connection;
+    $queue = $options->queue;
+    // ...
+}
+```
+
+- **`$index`**: The position of this activity in the workflow execution
+- **`$now`**: Deterministic timestamp from the workflow
+- **`$storedWorkflow`**: Reference to the workflow that spawned this activity
+- **`$arguments`**: Parameters passed when the activity was yielded
+
+## Executing Activities
+
+The `execute()` method contains your activity's logic and is automatically called when the activity job is processed:
+
+```php src/Activity.php
+public function handle()
+{
+    if (! method_exists($this, 'execute')) {
+        throw new BadMethodCallException('Execute method not implemented.');
+    }
+    
+    $this->container = App::make(Container::class);
+    
+    if ($this->storedWorkflow->hasLogByIndex($this->index)) {
+        return; // Already executed
+    }
+    
+    try {
+        return $this->{'execute'}(...$this->resolveClassMethodDependencies($this->arguments, $this, 'execute'));
+    } catch (\Throwable $throwable) {
+        $this->storedWorkflow->exceptions()->create([
+            'class' => $this::class,
+            'exception' => Serializer::serialize($throwable),
+        ]);
+        
+        if ($throwable instanceof NonRetryableExceptionContract) {
+            $this->fail($throwable);
+        }
+        
+        throw $throwable;
+    }
+}
+```
+
+### Idempotency
+
+Activities are idempotent—if an activity has already executed (checked via `hasLogByIndex`), it won't run again. This ensures activities execute exactly once, even if retried.
+
+## Creating Activities
+
+Here's a complete example of an activity:
+
+```php
+use Workflow\Activity;
+
+class SendOrderConfirmation extends Activity
+{
+    public function execute($orderId, $email)
+    {
+        // Fetch order details
+        $order = Order::findOrFail($orderId);
+        
+        // Send email (side effect)
+        Mail::to($email)->send(new OrderConfirmationMail($order));
+        
+        // Return confirmation
+        return [
+            'sent' => true,
+            'sentAt' => now()->toISOString(),
+            'orderId' => $orderId,
+        ];
+    }
+}
+```
+
+## Using Activities in Workflows
+
+You invoke activities from workflows using `ActivityStub::make()`:
+
+```php
+public function execute($orderId, $email)
+{
+    // Execute activity and wait for result
+    $confirmation = yield ActivityStub::make(
+        SendOrderConfirmation::class,
+        $orderId,
+        $email
+    );
+    
+    // Use the activity result
+    return $confirmation;
+}
+```
+
+When you yield an activity:
+
+1. The workflow pauses and transitions to "waiting" state
+2. The activity is dispatched as a queue job
+3. The activity executes independently
+4. The workflow resumes with the activity's return value
+
+## Retry Behavior
+
+Activities automatically retry on failure with exponential backoff:
+
+```php src/Activity.php
+public $tries = PHP_INT_MAX;
+public $maxExceptions = PHP_INT_MAX;
+
+public function backoff()
+{
+    return [1, 2, 5, 10, 15, 30, 60, 120];
+}
+```
+
+The default backoff strategy waits: 1s, 2s, 5s, 10s, 15s, 30s, 60s, 120s between retries.
+
+### Customizing Retry Behavior
+
+You can customize retry behavior in your activity:
+
+```php
+class SendOrderConfirmation extends Activity
+{
+    public $tries = 5;
+    public int $timeout = 60;
+    
+    public function backoff()
+    {
+        return [5, 10, 30, 60, 120];
+    }
+    
+    public function execute($orderId, $email)
+    {
+        // ...
+    }
+}
+```
+
+### Non-Retryable Exceptions
+
+Some exceptions shouldn't trigger retries. Implement `NonRetryableExceptionContract` to fail immediately:
+
+```php src/Activity.php
+if ($throwable instanceof NonRetryableExceptionContract) {
+    $this->fail($throwable);
+}
+```
+
+## Activity Timeouts
+
+You can configure timeouts to prevent activities from running too long:
+
+```php
+class ProcessLargeFile extends Activity
+{
+    public $timeout = 300; // 5 minutes
+    
+    public function execute($fileId)
+    {
+        // Long-running operation
+        return FileProcessor::process($fileId);
+    }
+}
+```
+
+## Accessing Workflow Context
+
+Activities can access information about the workflow that spawned them:
+
+```php
+class NotifyUser extends Activity
+{
+    public function execute($userId, $message)
+    {
+        // Access workflow ID
+        $workflowId = $this->workflowId();
+        
+        // Get webhook URL for signaling
+        $webhookUrl = $this->webhookUrl('userResponded');
+        
+        // Send notification with callback URL
+        NotificationService::send($userId, $message, $webhookUrl);
+        
+        return ['notified' => true, 'workflowId' => $workflowId];
+    }
+}
+```
+
+### Available Context Methods
+
+```php src/Activity.php
+public function workflowId()
+{
+    return $this->storedWorkflow->id;
+}
+
+public function webhookUrl(string $signalMethod = ''): string
+{
+    $workflow = Str::kebab(class_basename($this->storedWorkflow->class));
+    
+    if ($signalMethod === '') {
+        return route("workflows.start.{$workflow}");
+    }
+    
+    $signal = Str::kebab($signalMethod);
+    return route("workflows.signal.{$workflow}.{$signal}", [
+        'workflowId' => $this->storedWorkflow->id,
+    ]);
+}
+```
+
+## Dependency Injection
+
+Activities support Laravel's dependency injection:
+
+```php
+class ProcessPayment extends Activity
+{
+    public function execute(
+        PaymentService $paymentService,
+        $orderId,
+        $amount
+    ) {
+        // $paymentService is automatically resolved
+        return $paymentService->charge($orderId, $amount);
+    }
+}
+```
+
+## Error Handling
+
+When an activity fails permanently, the exception is stored and the workflow is notified:
+
+```php src/Activity.php
+public function failed(Throwable $throwable): void
+{
+    $workflow = $this->storedWorkflow->toWorkflow();
+    
+    $file = new SplFileObject($throwable->getFile());
+    $iterator = new LimitIterator($file, max(0, $throwable->getLine() - 4), 7);
+    
+    $throwable = [
+        'class' => get_class($throwable),
+        'message' => $throwable->getMessage(),
+        'code' => $throwable->getCode(),
+        'line' => $throwable->getLine(),
+        'file' => $throwable->getFile(),
+        'trace' => collect($throwable->getTrace())
+            ->filter(static fn ($trace) => Serializer::serializable($trace))
+            ->toArray(),
+        'snippet' => array_slice(iterator_to_array($iterator), 0, 7),
+    ];
+    
+    Exception::dispatch(
+        $this->index,
+        $this->now,
+        $this->storedWorkflow,
+        $throwable,
+        $workflow->connection(),
+        $workflow->queue()
+    );
+}
+```
+
+The exception details are captured with code snippets and stack traces for debugging.
+
+## Activity Uniqueness
+
+Each activity has a unique identifier based on the workflow and execution index:
+
+```php src/Activity.php
+public function uniqueId()
+{
+    return $this->storedWorkflow->id . ':' . $this->index;
+}
+```
+
+This ensures that even if the same activity is dispatched multiple times, each execution is tracked separately.
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Keep activities focused">
+    Each activity should do one thing well. If an activity is doing multiple unrelated operations, split it into separate activities.
+  </Accordion>
+  
+  <Accordion title="Make activities idempotent">
+    Design your activities so they can be safely retried. Check if work has already been done before performing side effects.
+  </Accordion>
+  
+  <Accordion title="Return meaningful data">
+    Return data that the workflow needs for decision making. Don't return large objects unnecessarily.
+  </Accordion>
+  
+  <Accordion title="Handle expected failures gracefully">
+    Catch expected exceptions and return error states instead of throwing, allowing the workflow to handle them.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Workflows" icon="diagram-project" href="/concepts/workflows">
+    Learn how workflows orchestrate activities
+  </Card>
+  <Card title="State Management" icon="database" href="/concepts/state-management">
+    Understand how workflow state is managed
+  </Card>
+</CardGroup>

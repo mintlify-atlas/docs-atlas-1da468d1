@@ -1,0 +1,357 @@
+---
+title: Queries and Updates
+description: Read workflow state and make synchronous updates during execution
+---
+
+Queries and updates allow you to interact with running workflows. Queries read the current state without modifying it, while updates make synchronous state changes.
+
+## Overview
+
+While signals provide asynchronous communication, queries and updates offer ways to interact with workflows synchronously:
+
+- **Queries**: Read-only methods that return the current workflow state
+- **Updates**: Synchronous methods that modify workflow state and return a result
+
+## Query Methods
+
+Mark methods with `#[QueryMethod]` to make them queryable from outside the workflow:
+
+```php
+use Workflow\Workflow;
+use Workflow\QueryMethod;
+use Workflow\SignalMethod;
+
+class OrderWorkflow extends Workflow
+{
+    private bool $canceled = false;
+    private string $status = 'pending';
+    private int $itemsProcessed = 0;
+    
+    #[QueryMethod]
+    public function isCanceled(): bool
+    {
+        return $this->canceled;
+    }
+    
+    #[QueryMethod]
+    public function getStatus(): string
+    {
+        return $this->status;
+    }
+    
+    #[QueryMethod]
+    public function getProgress(): array
+    {
+        return [
+            'items_processed' => $this->itemsProcessed,
+            'status' => $this->status,
+            'canceled' => $this->canceled,
+        ];
+    }
+    
+    #[SignalMethod]
+    public function cancel(): void
+    {
+        $this->canceled = true;
+    }
+    
+    public function execute($items)
+    {
+        foreach ($items as $item) {
+            if ($this->canceled) {
+                break;
+            }
+            
+            yield activity(ProcessItemActivity::class, $item);
+            $this->itemsProcessed++;
+            $this->status = 'processing';
+        }
+        
+        $this->status = $this->canceled ? 'canceled' : 'completed';
+        return $this->status;
+    }
+}
+```
+
+## Querying Workflows
+
+Call query methods on workflow instances to read their state:
+
+```php
+use Workflow\WorkflowStub;
+
+// Get the workflow instance
+$workflow = WorkflowStub::find($workflowId);
+
+// Query the workflow state
+$isCanceled = $workflow->isCanceled();
+$status = $workflow->getStatus();
+$progress = $workflow->getProgress();
+
+echo "Status: {$status}\n";
+echo "Progress: {$progress['items_processed']} items\n";
+```
+
+<Note>
+Query methods are executed immediately and return the current state without affecting workflow execution.
+</Note>
+
+## Update Methods
+
+Mark methods with `#[UpdateMethod]` for synchronous state modifications that return values:
+
+```php
+use Workflow\UpdateMethod;
+
+class InventoryWorkflow extends Workflow
+{
+    private int $quantity = 0;
+    
+    #[UpdateMethod]
+    public function addStock(int $amount): int
+    {
+        $this->quantity += $amount;
+        return $this->quantity;
+    }
+    
+    #[UpdateMethod]
+    public function removeStock(int $amount): int
+    {
+        if ($amount > $this->quantity) {
+            throw new \InvalidArgumentException('Insufficient stock');
+        }
+        
+        $this->quantity -= $amount;
+        return $this->quantity;
+    }
+    
+    #[QueryMethod]
+    public function getQuantity(): int
+    {
+        return $this->quantity;
+    }
+    
+    public function execute()
+    {
+        // Long-running inventory management workflow
+        yield await(fn () => $this->quantity <= 0);
+        
+        yield activity(NotifyOutOfStockActivity::class);
+        
+        return 'out_of_stock';
+    }
+}
+```
+
+## Calling Update Methods
+
+Update methods modify state and return results synchronously:
+
+```php
+$workflow = WorkflowStub::find($workflowId);
+
+// Call update method - returns new quantity
+$newQuantity = $workflow->addStock(100);
+echo "New quantity: {$newQuantity}\n";
+
+// Remove stock
+try {
+    $remaining = $workflow->removeStock(50);
+    echo "Remaining: {$remaining}\n";
+} catch (\InvalidArgumentException $e) {
+    echo "Error: {$e->getMessage()}\n";
+}
+```
+
+## Query vs Signal vs Update
+
+<CardGroup cols={3}>
+  <Card title="Query" icon="magnifying-glass">
+    **Read-only**
+    - Returns current state
+    - No side effects
+    - Synchronous
+  </Card>
+  <Card title="Signal" icon="signal">
+    **Write-only**
+    - Modifies state
+    - Returns void
+    - Asynchronous
+  </Card>
+  <Card title="Update" icon="pen-to-square">
+    **Read-write**
+    - Modifies state
+    - Returns result
+    - Synchronous
+  </Card>
+</CardGroup>
+
+## Real-Time Monitoring
+
+Queries enable real-time monitoring of workflow progress:
+
+```php
+class DataMigrationWorkflow extends Workflow
+{
+    private int $totalRecords = 0;
+    private int $processedRecords = 0;
+    private array $errors = [];
+    
+    #[QueryMethod]
+    public function getProgress(): array
+    {
+        $percentage = $this->totalRecords > 0 
+            ? ($this->processedRecords / $this->totalRecords) * 100 
+            : 0;
+            
+        return [
+            'total' => $this->totalRecords,
+            'processed' => $this->processedRecords,
+            'percentage' => round($percentage, 2),
+            'errors' => count($this->errors),
+        ];
+    }
+    
+    #[QueryMethod]
+    public function getErrors(): array
+    {
+        return $this->errors;
+    }
+    
+    public function execute($recordIds)
+    {
+        $this->totalRecords = count($recordIds);
+        
+        foreach ($recordIds as $recordId) {
+            try {
+                yield activity(MigrateRecordActivity::class, $recordId);
+                $this->processedRecords++;
+            } catch (\Exception $e) {
+                $this->errors[] = [
+                    'record_id' => $recordId,
+                    'error' => $e->getMessage(),
+                ];
+            }
+        }
+        
+        return 'completed';
+    }
+}
+```
+
+Monitor progress from external code:
+
+```php
+$workflow = WorkflowStub::make(DataMigrationWorkflow::class);
+$workflow->start($recordIds);
+
+while ($workflow->running()) {
+    $progress = $workflow->getProgress();
+    echo "Progress: {$progress['percentage']}%\n";
+    echo "Processed: {$progress['processed']}/{$progress['total']}\n";
+    echo "Errors: {$progress['errors']}\n\n";
+    
+    sleep(5);
+}
+
+if ($errors = $workflow->getErrors()) {
+    echo "Migration completed with errors:\n";
+    foreach ($errors as $error) {
+        echo "Record {$error['record_id']}: {$error['error']}\n";
+    }
+}
+```
+
+## Combining Queries and Signals
+
+Queries and signals work together for interactive workflows:
+
+```php
+class BatchJobWorkflow extends Workflow
+{
+    private bool $paused = false;
+    private string $status = 'running';
+    
+    #[SignalMethod]
+    public function pause(): void
+    {
+        $this->paused = true;
+        $this->status = 'paused';
+    }
+    
+    #[SignalMethod]
+    public function resume(): void
+    {
+        $this->paused = false;
+        $this->status = 'running';
+    }
+    
+    #[QueryMethod]
+    public function isPaused(): bool
+    {
+        return $this->paused;
+    }
+    
+    #[QueryMethod]
+    public function getStatus(): string
+    {
+        return $this->status;
+    }
+    
+    public function execute($jobs)
+    {
+        foreach ($jobs as $job) {
+            // Wait if paused
+            yield await(fn () => !$this->paused);
+            
+            yield activity(ProcessJobActivity::class, $job);
+        }
+        
+        $this->status = 'completed';
+        return 'completed';
+    }
+}
+```
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Progress Tracking" icon="chart-line">
+    Monitor workflow progress in real-time with query methods
+  </Card>
+  <Card title="State Inspection" icon="microscope">
+    Debug workflows by inspecting their current state
+  </Card>
+  <Card title="Dynamic Updates" icon="sliders">
+    Make synchronized changes with update methods that return results
+  </Card>
+  <Card title="Health Checks" icon="heart-pulse">
+    Query workflow health and status for monitoring systems
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Keep queries lightweight">
+    Query methods should return quickly. Avoid complex computations or database queries.
+  </Accordion>
+  
+  <Accordion title="Return immutable data">
+    Return copies of internal state rather than references to prevent external modification.
+  </Accordion>
+  
+  <Accordion title="Use updates sparingly">
+    Prefer signals for most state modifications. Use updates only when you need synchronous feedback.
+  </Accordion>
+  
+  <Accordion title="Document query contracts">
+    Clearly document what queries return and when values change during workflow execution.
+  </Accordion>
+</AccordionGroup>
+
+## Related Patterns
+
+- [Signals](/patterns/signals) - Asynchronous workflow communication
+- [Await Conditions](/patterns/await-conditions) - Wait for state changes
+- [Timers](/patterns/timers) - Time-based workflow control

@@ -1,0 +1,558 @@
+---
+title: 'Error Handling'
+description: 'Handle exceptions and failures in workflows and activities'
+icon: 'triangle-exclamation'
+---
+
+## Overview
+
+Robust error handling is critical for long-running workflows. The package provides automatic retry mechanisms, exception tracking, and failure handling strategies.
+
+## Exception Types
+
+### Retryable Exceptions
+
+By default, all exceptions thrown in activities are **retryable**. The activity will automatically retry with exponential backoff.
+
+```php
+use Workflow\Activity;
+
+class PaymentActivity extends Activity
+{
+    public function execute($amount)
+    {
+        // This will retry automatically if it fails
+        return $this->paymentGateway->charge($amount);
+    }
+}
+```
+
+### Non-Retryable Exceptions
+
+For exceptions that should not be retried (validation errors, etc.), implement `NonRetryableExceptionContract`:
+
+```php
+use Workflow\Exceptions\NonRetryableException;
+
+throw new NonRetryableException('Invalid payment amount');
+```
+
+From `src/Activity.php:127-129`, when a `NonRetryableExceptionContract` is thrown:
+1. The exception is logged to the database
+2. The activity is immediately failed (no retries)
+3. The workflow execution stops
+
+**Creating Custom Non-Retryable Exceptions:**
+
+```php
+use Workflow\Exceptions\NonRetryableExceptionContract;
+
+class InvalidOrderException extends \Exception implements NonRetryableExceptionContract
+{
+    public static function orderNotFound(string $orderId): self
+    {
+        return new self("Order {$orderId} not found");
+    }
+}
+```
+
+## Activity Error Handling
+
+### Automatic Retries
+
+Activities automatically retry on failure. From `src/Activity.php:77-80`, the default backoff schedule:
+
+```php
+public function backoff()
+{
+    return [1, 2, 5, 10, 15, 30, 60, 120]; // seconds
+}
+```
+
+This means:
+- 1st retry: after 1 second
+- 2nd retry: after 2 seconds
+- 3rd retry: after 5 seconds
+- ...
+- 8th retry: after 120 seconds
+- 9th+ retry: every 120 seconds (until max attempts)
+
+### Custom Backoff Strategy
+
+Override the `backoff()` method in your activity:
+
+```php
+class PaymentActivity extends Activity
+{
+    public function backoff()
+    {
+        // Faster retries
+        return [1, 1, 2, 3, 5, 8, 13, 21]; // Fibonacci
+    }
+}
+```
+
+```php
+class EmailActivity extends Activity
+{
+    public function backoff()
+    {
+        // Linear backoff
+        return [5, 10, 15, 20, 25, 30];
+    }
+}
+```
+
+```php
+class ApiActivity extends Activity
+{
+    public function backoff()
+    {
+        // Exponential backoff with jitter
+        return collect([1, 2, 4, 8, 16, 32, 64])
+            ->map(fn($delay) => $delay + rand(0, 5))
+            ->toArray();
+    }
+}
+```
+
+### Exception Tracking
+
+All exceptions are automatically logged to the database (from `src/Activity.php:121-125`):
+
+```php
+$this->storedWorkflow->exceptions()->create([
+    'class' => $this::class,
+    'exception' => Serializer::serialize($throwable),
+]);
+```
+
+**Querying Exceptions:**
+
+```php
+use Workflow\Models\StoredWorkflow;
+
+$workflow = StoredWorkflow::find($workflowId);
+
+// Get all exceptions
+$exceptions = $workflow->exceptions;
+
+// Get exceptions for specific activity
+$paymentExceptions = $workflow->exceptions()
+    ->where('class', PaymentActivity::class)
+    ->get();
+
+// Count failures
+$failureCount = $workflow->exceptions()->count();
+```
+
+### Activity Failed Hook
+
+The `failed()` method is called when an activity fails permanently (from `src/Activity.php:148-175`):
+
+```php
+class PaymentActivity extends Activity
+{
+    public function execute($amount)
+    {
+        return $this->paymentGateway->charge($amount);
+    }
+    
+    public function failed(Throwable $throwable): void
+    {
+        // Custom failure handling
+        Log::error('Payment activity failed', [
+            'workflow_id' => $this->workflowId(),
+            'amount' => $this->arguments[0],
+            'error' => $throwable->getMessage(),
+        ]);
+        
+        // Notify team
+        Slack::send('Payment processing failed: ' . $throwable->getMessage());
+        
+        // Don't forget to call parent to dispatch exception
+        parent::failed($throwable);
+    }
+}
+```
+
+## Workflow Error Handling
+
+### Try-Catch in Workflows
+
+Handle activity failures gracefully within workflows:
+
+```php
+use Workflow\Workflow;
+
+class OrderWorkflow extends Workflow
+{
+    public function execute($orderId)
+    {
+        try {
+            yield $this->chargePayment($orderId);
+            yield $this->shipOrder($orderId);
+        } catch (PaymentFailedException $e) {
+            // Handle payment failure
+            yield $this->sendPaymentFailedEmail($orderId);
+            yield $this->cancelOrder($orderId);
+            throw $e; // Re-throw to fail workflow
+        } catch (\Exception $e) {
+            // Handle unexpected errors
+            yield $this->notifySupport($orderId, $e->getMessage());
+            throw $e;
+        }
+    }
+}
+```
+
+### Compensating Actions
+
+Implement rollback logic for failures:
+
+```php
+class BookingWorkflow extends Workflow
+{
+    private $flightBooked = false;
+    private $hotelBooked = false;
+    
+    public function execute($userId, $destination)
+    {
+        try {
+            // Book flight
+            $flight = yield $this->bookFlight($destination);
+            $this->flightBooked = true;
+            
+            // Book hotel
+            $hotel = yield $this->bookHotel($destination);
+            $this->hotelBooked = true;
+            
+            // Charge customer
+            yield $this->chargeCustomer($userId, $flight, $hotel);
+            
+            return ['flight' => $flight, 'hotel' => $hotel];
+            
+        } catch (\Exception $e) {
+            // Compensate: cancel bookings
+            if ($this->hotelBooked) {
+                yield $this->cancelHotel($hotel);
+            }
+            if ($this->flightBooked) {
+                yield $this->cancelFlight($flight);
+            }
+            
+            throw new BookingFailedException(
+                'Booking failed: ' . $e->getMessage(),
+                previous: $e
+            );
+        }
+    }
+}
+```
+
+### Saga Pattern
+
+Implement distributed transactions:
+
+```php
+class PaymentSagaWorkflow extends Workflow
+{
+    private array $completedSteps = [];
+    
+    public function execute($orderId, $amount)
+    {
+        try {
+            // Step 1: Reserve inventory
+            yield $this->reserveInventory($orderId);
+            $this->completedSteps[] = 'inventory';
+            
+            // Step 2: Authorize payment
+            $authId = yield $this->authorizePayment($amount);
+            $this->completedSteps[] = 'payment';
+            
+            // Step 3: Create shipment
+            yield $this->createShipment($orderId);
+            $this->completedSteps[] = 'shipment';
+            
+            // Step 4: Capture payment
+            yield $this->capturePayment($authId);
+            
+            return true;
+            
+        } catch (\Exception $e) {
+            // Rollback completed steps in reverse order
+            yield $this->rollback();
+            throw $e;
+        }
+    }
+    
+    private function rollback()
+    {
+        foreach (array_reverse($this->completedSteps) as $step) {
+            match($step) {
+                'inventory' => yield $this->releaseInventory(),
+                'payment' => yield $this->voidPayment(),
+                'shipment' => yield $this->cancelShipment(),
+            };
+        }
+    }
+}
+```
+
+## Exception Job
+
+When an activity fails permanently, an `Exception` job is dispatched (from `src/Activity.php:167-174`):
+
+```php
+Exception::dispatch(
+    $this->index,
+    $this->now,
+    $this->storedWorkflow,
+    $throwable,
+    $workflow->connection(),
+    $workflow->queue()
+);
+```
+
+The Exception job (from `src/Exception.php:49-64`):
+1. Attempts to resume the workflow
+2. Passes the exception to the workflow for handling
+3. Allows workflow code to catch and handle the exception
+4. Releases the job if workflow is still running
+
+## Error States
+
+### TransitionNotFound Exception
+
+Thrown when workflow replay encounters an unexpected state (from `src/Exceptions/TransitionNotFound.php:9-26`):
+
+```php
+use Workflow\Exceptions\TransitionNotFound;
+
+try {
+    $workflow->resume();
+} catch (TransitionNotFound $e) {
+    Log::warning('Workflow replay failed', [
+        'from' => $e->getFrom(),
+        'to' => $e->getTo(),
+        'model' => $e->getModelClass(),
+    ]);
+}
+```
+
+This typically happens when:
+- Workflow code changed without versioning
+- Database state is corrupted
+- Race condition in workflow execution
+
+### VersionNotSupportedException
+
+Thrown when workflow version is outside supported range:
+
+```php
+use Workflow\Exceptions\VersionNotSupportedException;
+
+try {
+    $version = yield self::getVersion('update', 2, 3);
+} catch (VersionNotSupportedException $e) {
+    // Version 1 for change ID 'update' is not supported.
+    // Supported range: [2, 3]
+    Log::error('Unsupported workflow version', [
+        'error' => $e->getMessage(),
+    ]);
+}
+```
+
+See [Versioning](/advanced/versioning) for more details.
+
+## Monitoring and Alerting
+
+### Track Activity Failures
+
+```php
+use Workflow\Events\ActivityFailed;
+use Illuminate\Support\Facades\Event;
+
+Event::listen(ActivityFailed::class, function ($event) {
+    $exception = json_decode($event->exception, true);
+    
+    Log::error('Activity failed', [
+        'workflow_id' => $event->workflowId,
+        'activity' => $event->class,
+        'error' => $exception['message'],
+    ]);
+    
+    // Send alert if critical
+    if (str_contains($event->class, 'Payment')) {
+        Slack::sendError('Payment activity failed', $exception);
+    }
+});
+```
+
+### Dashboard Queries
+
+```php
+// Failed workflows
+$failedWorkflows = StoredWorkflow::where('status', 'failed')
+    ->with('exceptions')
+    ->latest()
+    ->get();
+
+// Workflows with high exception count
+$problematicWorkflows = StoredWorkflow::withCount('exceptions')
+    ->having('exceptions_count', '>', 5)
+    ->get();
+
+// Most common exceptions
+$commonExceptions = DB::table('workflow_exceptions')
+    ->select('class', DB::raw('count(*) as count'))
+    ->groupBy('class')
+    ->orderByDesc('count')
+    ->get();
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Specific Exceptions">
+    Create meaningful exception types:
+    ```php
+    // ❌ Generic
+    throw new \Exception('Payment failed');
+    
+    // ✅ Specific
+    throw new PaymentDeclinedException('Card declined: insufficient funds');
+    ```
+  </Accordion>
+
+  <Accordion title="Add Context to Exceptions">
+    ```php
+    throw new PaymentFailedException(
+        message: 'Payment processing failed',
+        context: [
+            'order_id' => $orderId,
+            'amount' => $amount,
+            'gateway' => 'stripe',
+            'error_code' => $e->getCode(),
+        ]
+    );
+    ```
+  </Accordion>
+
+  <Accordion title="Implement Idempotency">
+    Make activities safe to retry:
+    ```php
+    public function execute($orderId)
+    {
+        // Check if already processed
+        if (Payment::where('order_id', $orderId)->exists()) {
+            return Payment::where('order_id', $orderId)->first();
+        }
+        
+        // Process payment with idempotency key
+        return $this->gateway->charge(
+            amount: $amount,
+            idempotency_key: "order_{$orderId}"
+        );
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Set Appropriate Timeouts">
+    ```php
+    class LongRunningActivity extends Activity
+    {
+        public $timeout = 300; // 5 minutes
+        
+        public function backoff()
+        {
+            return [60, 120, 180]; // Long delays between retries
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Log Generously">
+    ```php
+    public function execute($orderId)
+    {
+        Log::info('Processing order', ['order_id' => $orderId]);
+        
+        try {
+            $result = $this->process($orderId);
+            Log::info('Order processed successfully', [
+                'order_id' => $orderId,
+                'result' => $result,
+            ]);
+            return $result;
+        } catch (\Exception $e) {
+            Log::error('Order processing failed', [
+                'order_id' => $orderId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            throw $e;
+        }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Testing Error Scenarios
+
+```php
+use Illuminate\Foundation\Testing\RefreshDatabase;
+
+class WorkflowErrorHandlingTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_activity_retries_on_failure()
+    {
+        // Mock API to fail twice, then succeed
+        Http::fake([
+            'api.example.com/*' => Http::sequence()
+                ->push(['error' => 'timeout'], 500)
+                ->push(['error' => 'timeout'], 500)
+                ->push(['success' => true], 200),
+        ]);
+
+        $workflow = WorkflowStub::make(ApiWorkflow::class);
+        $result = $workflow->start('test');
+
+        $this->assertTrue($result);
+    }
+
+    public function test_non_retryable_exception_fails_immediately()
+    {
+        $this->expectException(NonRetryableException::class);
+
+        $workflow = WorkflowStub::make(ValidationWorkflow::class);
+        $workflow->start(invalidData: true);
+    }
+
+    public function test_workflow_compensates_on_failure()
+    {
+        // Simulate payment failure
+        Payment::shouldReceive('charge')->andThrow(new PaymentException());
+
+        try {
+            $workflow = WorkflowStub::make(OrderWorkflow::class);
+            $workflow->start('order_123');
+        } catch (PaymentException $e) {
+            // Assert compensating actions occurred
+            $this->assertDatabaseHas('orders', [
+                'id' => 'order_123',
+                'status' => 'cancelled',
+            ]);
+        }
+    }
+}
+```
+
+## Related Topics
+
+- [Retries](/advanced/retries) - Detailed retry configuration
+- [Middleware](/advanced/middleware) - Error handling middleware
+- [Activities](/concepts/activities) - Activity basics
+- [Versioning](/advanced/versioning) - Safe code evolution

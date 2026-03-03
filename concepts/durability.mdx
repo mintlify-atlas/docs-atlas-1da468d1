@@ -1,0 +1,464 @@
+---
+title: Durability
+description: Understand how workflows persist state and replay execution to achieve fault tolerance
+---
+
+## Overview
+
+Durability is the core feature that makes workflows resilient to failures. When a workflow executes, every step is logged to the database. If a server crashes, the workflow can be reconstructed by replaying its history.
+
+This means your workflows can:
+- Survive server restarts
+- Handle queue worker failures
+- Continue from where they left off after errors
+- Maintain state across long periods of time
+
+## How Durability Works
+
+Durability is achieved through three mechanisms:
+
+1. **Event Sourcing**: Every activity result is logged
+2. **Replay**: Workflows are reconstructed by replaying logged events
+3. **State Persistence**: The current workflow state is stored in the database
+
+### The StoredWorkflow Model
+
+Each workflow is represented by a `StoredWorkflow` record:
+
+```php src/Models/StoredWorkflow.php
+class StoredWorkflow extends Model
+{
+    use HasStates;
+    use Prunable;
+    
+    protected $table = 'workflows';
+    
+    protected $casts = [
+        'status' => WorkflowStatus::class,
+    ];
+    
+    public function logs(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(config('workflows.stored_workflow_log_model', StoredWorkflowLog::class))
+            ->orderBy('id');
+    }
+    
+    public function signals(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(config('workflows.stored_workflow_signal_model', StoredWorkflowSignal::class))
+            ->orderBy('id');
+    }
+    
+    public function exceptions(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(config('workflows.stored_workflow_exception_model', StoredWorkflowException::class))
+            ->orderBy('id');
+    }
+}
+```
+
+The model stores:
+- **class**: The workflow class name
+- **arguments**: Serialized input arguments
+- **output**: Serialized return value (when completed)
+- **status**: Current workflow state
+- **logs**: History of all executed activities
+- **signals**: External messages sent to the workflow
+- **exceptions**: Errors encountered during execution
+
+## Execution Logging
+
+Every time an activity completes, its result is logged:
+
+```php src/WorkflowStub.php
+public function next($index, $now, $class, $result, bool $shouldSignal = true): void
+{
+    try {
+        $this->storedWorkflow->createLog([
+            'index' => $index,
+            'now' => $now,
+            'class' => $class,
+            'result' => Serializer::serialize($result),
+        ]);
+    } catch (\Illuminate\Database\UniqueConstraintViolationException $exception) {
+        // already logged
+    }
+    
+    if ($shouldSignal) {
+        $this->dispatch();
+    }
+}
+```
+
+Each log entry contains:
+- **index**: The position in the workflow execution
+- **now**: The deterministic timestamp when the activity ran
+- **class**: The activity class name
+- **result**: The serialized return value
+
+### Finding Logs by Index
+
+Workflows look up past execution results by index:
+
+```php src/Models/StoredWorkflow.php
+public function findLogByIndex(int $index, bool $fresh = false): ?StoredWorkflowLog
+{
+    if ($fresh) {
+        $log = $this->logs()
+            ->whereIndex($index)
+            ->first();
+        
+        if ($this->relationLoaded('logs') && $log !== null) {
+            $logs = $this->getRelation('logs');
+            if (! $logs->contains('id', $log->id)) {
+                $this->setRelation('logs', $logs->push($log)->sortBy('id')->values());
+            }
+        }
+        
+        return $log;
+    }
+    
+    if ($this->relationLoaded('logs')) {
+        $logs = $this->getRelation('logs');
+        return $logs->firstWhere('index', $index);
+    }
+    
+    return $this->logs()
+        ->whereIndex($index)
+        ->first();
+}
+
+public function hasLogByIndex(int $index): bool
+{
+    if ($this->relationLoaded('logs')) {
+        return $this->findLogByIndex($index) !== null;
+    }
+    
+    return $this->logs()
+        ->whereIndex($index)
+        ->exists();
+}
+```
+
+## Replay Mechanism
+
+When a workflow resumes, it replays its history to reconstruct its state:
+
+```php src/Workflow.php
+public function handle(): void
+{
+    // ...
+    $this->storedWorkflow->loadMissing(['logs', 'signals']);
+    
+    $log = $this->storedWorkflow->findLogByIndex($this->index);
+    
+    // Process signals
+    $this->storedWorkflow
+        ->signals()
+        ->orderBy('created_at')
+        ->each(function ($signal): void {
+            if (WorkflowStub::isUpdateMethod($this->storedWorkflow->class, $signal->method)) {
+                $this->updateMethodSignals[] = $signal;
+                return;
+            }
+            $this->{$signal->method}(...Serializer::unserialize($signal->arguments));
+        });
+    
+    // Set deterministic time
+    if ($parentWorkflow) {
+        $this->now = Carbon::parse($parentWorkflow->pivot->parent_now);
+    } else {
+        $this->now = $log ? $log->now : Carbon::now();
+    }
+    
+    WorkflowStub::setContext([
+        'storedWorkflow' => $this->storedWorkflow,
+        'index' => $this->index,
+        'now' => $this->now,
+        'replaying' => $this->replaying,
+    ]);
+    
+    // Create coroutine and replay
+    $this->coroutine = $this->{'execute'}(...$this->resolveClassMethodDependencies(
+        $this->arguments,
+        $this,
+        'execute'
+    ));
+    
+    while ($this->coroutine->valid()) {
+        $this->index = WorkflowStub::getContext()->index;
+        $log = $this->storedWorkflow->findLogByIndex($this->index);
+        $this->now = $log ? $log->now : Carbon::now();
+        
+        WorkflowStub::setContext([
+            'storedWorkflow' => $this->storedWorkflow,
+            'index' => $this->index,
+            'now' => $this->now,
+            'replaying' => $this->replaying,
+        ]);
+        
+        $current = $this->coroutine->current();
+        
+        if ($current instanceof PromiseInterface) {
+            // Handle promise resolution
+        }
+    }
+}
+```
+
+### The Replaying Flag
+
+The `replaying` flag indicates whether the workflow is reconstructing state from history:
+
+```php src/Workflow.php
+public bool $replaying = false;
+```
+
+During replay:
+- State transitions are skipped
+- Activities that already have logs are not re-executed
+- The workflow fast-forwards through completed steps
+
+### Deterministic Time
+
+Workflows use deterministic timestamps to ensure consistent replay:
+
+```php src/Workflow.php
+$this->now = $log ? $log->now : Carbon::now();
+```
+
+Instead of calling `Carbon::now()` directly, workflows use `WorkflowStub::now()`:
+
+```php src/WorkflowStub.php
+public static function now()
+{
+    return self::getContext()->now;
+}
+```
+
+This ensures that time-based logic produces the same results during replay.
+
+<Warning>
+  Never use `time()`, `now()`, or `Carbon::now()` directly in workflows. Always use `WorkflowStub::now()`.
+</Warning>
+
+## Activity Idempotency
+
+Activities check if they've already executed before running:
+
+```php src/Activity.php
+public function handle()
+{
+    if (! method_exists($this, 'execute')) {
+        throw new BadMethodCallException('Execute method not implemented.');
+    }
+    
+    $this->container = App::make(Container::class);
+    
+    if ($this->storedWorkflow->hasLogByIndex($this->index)) {
+        return; // Already executed
+    }
+    
+    try {
+        return $this->{'execute'}(...$this->resolveClassMethodDependencies($this->arguments, $this, 'execute'));
+    } catch (\Throwable $throwable) {
+        // Handle exception
+    }
+}
+```
+
+This prevents activities from executing multiple times, ensuring exactly-once semantics.
+
+## Serialization
+
+All workflow data (arguments, outputs, activity results) must be serializable:
+
+```php
+// ✓ Serializable
+$data = [
+    'orderId' => 123,
+    'amount' => 99.99,
+    'items' => ['SKU-1', 'SKU-2'],
+];
+
+// ✗ Not serializable (closures)
+$callback = function() { return 'test'; };
+
+// ✗ Not serializable (database connections)
+$connection = DB::connection();
+```
+
+Use the `SerializesModels` trait for Eloquent models:
+
+```php
+use Workflow\Traits\SerializesModels;
+
+class OrderWorkflow extends Workflow
+{
+    use SerializesModels;
+    
+    public function execute(Order $order)
+    {
+        // $order is automatically serialized/unserialized
+    }
+}
+```
+
+## Query Methods and Replay
+
+Query methods trigger a full replay to read current state:
+
+```php src/Workflow.php
+public function query($method)
+{
+    $this->replaying = true;
+    $this->handle();
+    
+    foreach ($this->updateMethodSignals as $signal) {
+        $this->{$signal->method}(...Serializer::unserialize($signal->arguments));
+    }
+    
+    $sentBefore = $this->outbox->sent;
+    $result = $this->{$method}();
+    $this->outboxWasConsumed = $this->outbox->sent > $sentBefore;
+    
+    return $result;
+}
+```
+
+The workflow replays all activities and signals to reconstruct its state, then executes the query method.
+
+## Continued Workflows
+
+Workflows can continue by spawning a new workflow instance:
+
+```php src/Workflow.php
+if ($return instanceof ContinuedWorkflow) {
+    $this->storedWorkflow->status->transitionTo(WorkflowContinuedStatus::class);
+    return;
+}
+```
+
+Continued workflows maintain the execution history chain while avoiding performance issues from extremely long histories.
+
+## Child Workflow Relationships
+
+Workflows can spawn children, creating a hierarchy:
+
+```php src/Models/StoredWorkflow.php
+public function parents(): BelongsToMany
+{
+    return $this->belongsToMany(
+        config('workflows.stored_workflow_model', self::class),
+        config('workflows.workflow_relationships_table', 'workflow_relationships'),
+        'child_workflow_id',
+        'parent_workflow_id'
+    )->withPivot(['parent_index', 'parent_now']);
+}
+
+public function children(): BelongsToMany
+{
+    return $this->belongsToMany(
+        config('workflows.stored_workflow_model', self::class),
+        config('workflows.workflow_relationships_table', 'workflow_relationships'),
+        'parent_workflow_id',
+        'child_workflow_id'
+    )->withPivot(['parent_index', 'parent_now']);
+}
+```
+
+Child workflows inherit timing context from their parent for deterministic execution.
+
+## Workflow Pruning
+
+Completed workflows can be automatically pruned:
+
+```php src/Models/StoredWorkflow.php
+public function prunable(): Builder
+{
+    return static::where('status', 'completed')
+        ->where('created_at', '<=', now()->sub(config('workflows.prune_age', '1 month')))
+        ->whereDoesntHave('parents');
+}
+
+protected function pruning(): void
+{
+    $this->recursivePrune($this);
+}
+
+protected function recursivePrune(self $workflow): void
+{
+    $workflow->children()->each(function ($child) {
+        $this->recursivePrune($child);
+    });
+    
+    $workflow->parents()->detach();
+    $workflow->exceptions()->delete();
+    $workflow->logs()->delete();
+    $workflow->signals()->delete();
+    $workflow->timers()->delete();
+    
+    if ($workflow->id !== $this->id) {
+        $workflow->delete();
+    }
+}
+```
+
+Pruning recursively deletes all workflow data including children, logs, and relationships.
+
+## Best Practices for Durability
+
+<AccordionGroup>
+  <Accordion title="Always use WorkflowStub::now()">
+    Never use `time()`, `Carbon::now()`, or other non-deterministic time functions directly in workflows.
+  </Accordion>
+  
+  <Accordion title="Keep activities idempotent">
+    Design activities so they can be safely retried without side effects.
+  </Accordion>
+  
+  <Accordion title="Serialize only necessary data">
+    Don't pass large objects or resources as workflow arguments. Pass IDs and fetch data in activities.
+  </Accordion>
+  
+  <Accordion title="Use SerializesModels for Eloquent models">
+    The `SerializesModels` trait properly handles model serialization.
+  </Accordion>
+  
+  <Accordion title="Monitor workflow history size">
+    Very long-running workflows with many activities may need continuation to avoid performance issues.
+  </Accordion>
+</AccordionGroup>
+
+## Debugging Replay
+
+To understand how your workflow replays:
+
+1. **Check logs**: Examine the `workflow_logs` table to see execution history
+2. **Monitor exceptions**: Look at `workflow_exceptions` for errors during replay
+3. **Use the replaying flag**: Add conditional logging based on `$this->replaying`
+4. **Verify determinism**: Ensure the same inputs always produce the same outputs
+
+```php
+public function execute($orderId)
+{
+    if ($this->replaying) {
+        Log::debug('Replaying workflow', ['orderId' => $orderId, 'index' => $this->index]);
+    }
+    
+    $payment = yield ActivityStub::make(ProcessPayment::class, $orderId);
+    
+    return $payment;
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Workflows" icon="diagram-project" href="/concepts/workflows">
+    Review workflow fundamentals
+  </Card>
+  <Card title="Activities" icon="bolt" href="/concepts/activities">
+    Learn more about activity execution
+  </Card>
+</CardGroup>

@@ -1,0 +1,362 @@
+---
+title: Side Effects
+description: Execute non-deterministic code safely within workflow execution
+---
+
+Side effects provide a way to execute non-deterministic code within workflows while maintaining determinism during replay. This is essential for operations like generating random numbers, reading the current time, or making external API calls.
+
+## Overview
+
+Workflows must be deterministic - they must produce the same result when replayed. However, some operations are inherently non-deterministic (random numbers, timestamps, UUIDs). Side effects solve this by caching the result on first execution and returning the cached value during replay.
+
+## The Problem
+
+Non-deterministic code breaks workflow replay:
+
+```php
+// ❌ Non-deterministic - breaks replay
+class BadWorkflow extends Workflow
+{
+    public function execute()
+    {
+        $randomValue = random_int(1, 1000);
+        
+        yield activity(ProcessActivity::class, $randomValue);
+        
+        // During replay, random_int() returns a different value!
+        // This breaks determinism.
+        
+        return 'completed';
+    }
+}
+```
+
+## The Solution
+
+Wrap non-deterministic code in `sideEffect()`:
+
+```php
+use function Workflow\sideEffect;
+
+// ✓ Deterministic - safe for replay
+class GoodWorkflow extends Workflow
+{
+    public function execute()
+    {
+        $randomValue = yield sideEffect(fn () => random_int(1, 1000));
+        
+        yield activity(ProcessActivity::class, $randomValue);
+        
+        // During replay, sideEffect() returns the cached value
+        // Determinism is maintained!
+        
+        return 'completed';
+    }
+}
+```
+
+<Note>
+The first time a side effect executes, it runs the callable and stores the result. On replay, it returns the stored result without re-executing the callable.
+</Note>
+
+## Basic Usage
+
+Use the `sideEffect()` helper function with a callable:
+
+```php
+use function Workflow\sideEffect;
+
+class WorkflowWithSideEffects extends Workflow
+{
+    public function execute()
+    {
+        // Generate random number
+        $random = yield sideEffect(fn () => random_int(1, 100));
+        
+        // Generate UUID
+        $uuid = yield sideEffect(fn () => (string) Str::uuid());
+        
+        // Get current timestamp
+        $timestamp = yield sideEffect(fn () => time());
+        
+        yield activity(ProcessActivity::class, $random, $uuid, $timestamp);
+        
+        return 'completed';
+    }
+}
+```
+
+## Common Use Cases
+
+### Random Numbers
+
+```php
+public function execute()
+{
+    // Generate random ID
+    $randomId = yield sideEffect(fn () => random_int(PHP_INT_MIN, PHP_INT_MAX));
+    
+    // Use in activity
+    yield activity(CreateRecordActivity::class, $randomId);
+    
+    return $randomId;
+}
+```
+
+### UUIDs
+
+```php
+use Illuminate\Support\Str;
+
+public function execute()
+{
+    // Generate unique identifier
+    $correlationId = yield sideEffect(fn () => (string) Str::uuid());
+    
+    yield activity(LogEventActivity::class, $correlationId);
+    yield activity(ProcessActivity::class, $correlationId);
+    
+    return $correlationId;
+}
+```
+
+### Timestamps
+
+```php
+public function execute()
+{
+    // Capture execution start time
+    $startTime = yield sideEffect(fn () => microtime(true));
+    
+    yield activity(HeavyProcessActivity::class);
+    
+    $endTime = yield sideEffect(fn () => microtime(true));
+    $duration = $endTime - $startTime;
+    
+    yield activity(LogDurationActivity::class, $duration);
+    
+    return 'completed';
+}
+```
+
+<Warning>
+For current workflow time, use the built-in `now()` function instead of `sideEffect()`. It's optimized for workflow time tracking.
+</Warning>
+
+## What NOT to Use Side Effects For
+
+<AccordionGroup>
+  <Accordion title="✗ Current workflow time">
+    ```php
+    // ❌ Don't do this
+    $now = yield sideEffect(fn () => now());
+    
+    // ✓ Do this instead
+    $now = Workflow\now();
+    ```
+  </Accordion>
+  
+  <Accordion title="✗ Database queries">
+    ```php
+    // ❌ Don't do this
+    $user = yield sideEffect(fn () => User::find(1));
+    
+    // ✓ Do this instead
+    $user = yield activity(GetUserActivity::class, 1);
+    ```
+  </Accordion>
+  
+  <Accordion title="✗ External API calls">
+    ```php
+    // ❌ Don't do this
+    $result = yield sideEffect(fn () => Http::get('https://api.example.com/data'));
+    
+    // ✓ Do this instead
+    $result = yield activity(FetchDataActivity::class);
+    ```
+  </Accordion>
+  
+  <Accordion title="✗ File I/O">
+    ```php
+    // ❌ Don't do this
+    $contents = yield sideEffect(fn () => file_get_contents('/path/to/file'));
+    
+    // ✓ Do this instead
+    $contents = yield activity(ReadFileActivity::class, '/path/to/file');
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Side Effects vs Activities
+
+<Tabs>
+  <Tab title="Side Effects">
+    **Use for:**
+    - Generating random values
+    - Creating UUIDs
+    - Reading timestamps
+    - Lightweight, local operations
+    - Things that should NOT retry
+    
+    **Characteristics:**
+    - Cached on first execution
+    - No retry logic
+    - Synchronous
+    - Part of workflow execution
+  </Tab>
+  <Tab title="Activities">
+    **Use for:**
+    - Database operations
+    - External API calls
+    - File I/O
+    - Long-running operations
+    - Things that SHOULD retry
+    
+    **Characteristics:**
+    - Can fail and retry
+    - Asynchronous
+    - Separate execution context
+    - Tracked independently
+  </Tab>
+</Tabs>
+
+## Real-World Example
+
+Compare deterministic vs non-deterministic execution:
+
+```php
+use function Workflow\{activity, sideEffect};
+
+class ComparisonWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // ✓ Deterministic - cached during replay
+        $goodRandom = yield sideEffect(fn () => random_int(PHP_INT_MIN, PHP_INT_MAX));
+        
+        // ❌ Non-deterministic - different on replay
+        $badRandom = random_int(PHP_INT_MIN, PHP_INT_MAX);
+        
+        yield activity(ProcessActivity::class);
+        
+        // Pass both to activity
+        $result1 = yield activity(CompareActivity::class, $goodRandom);
+        $result2 = yield activity(CompareActivity::class, $badRandom);
+        
+        if ($goodRandom !== $result1) {
+            throw new \Exception(
+                'Good random should match because it was wrapped in sideEffect()!'
+            );
+        }
+        
+        if ($badRandom === $result2) {
+            throw new \Exception(
+                'Bad random should NOT match because it was not wrapped in sideEffect()!'
+            );
+        }
+        
+        return 'workflow';
+    }
+}
+```
+
+## Multiple Side Effects
+
+Each side effect is cached independently:
+
+```php
+public function execute()
+{
+    $id1 = yield sideEffect(fn () => Str::uuid());
+    $id2 = yield sideEffect(fn () => Str::uuid());
+    $id3 = yield sideEffect(fn () => Str::uuid());
+    
+    // All three UUIDs are different and cached
+    yield activity(ProcessActivity::class, $id1, $id2, $id3);
+    
+    // On replay, same three UUIDs are returned
+    
+    return 'completed';
+}
+```
+
+## Determinism Rules
+
+<CardGroup cols={2}>
+  <Card title="Deterministic" icon="check">
+    - Workflow state
+    - Signal values
+    - Activity results
+    - Side effect results
+    - Workflow arguments
+  </Card>
+  <Card title="Non-Deterministic" icon="xmark">
+    - random_int()
+    - microtime()
+    - Str::uuid()
+    - External API calls
+    - Database queries
+  </Card>
+</CardGroup>
+
+## When Replay Happens
+
+Workflows replay in several scenarios:
+
+<Steps>
+  <Step title="After signals">
+    When a workflow receives a signal, it replays from the start
+  </Step>
+  <Step title="After activity completion">
+    When an activity completes, the workflow replays to resume
+  </Step>
+  <Step title="After timer expiration">
+    When a timer fires, the workflow replays to continue
+  </Step>
+  <Step title="During recovery">
+    If a workflow process crashes and restarts
+  </Step>
+</Steps>
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Unique Identifiers" icon="fingerprint">
+    Generate UUIDs or random IDs for correlation
+  </Card>
+  <Card title="Timestamps" icon="clock">
+    Capture specific execution timestamps (not workflow time)
+  </Card>
+  <Card title="Random Selection" icon="dice">
+    Make random choices that must be consistent on replay
+  </Card>
+  <Card title="Performance Tracking" icon="stopwatch">
+    Measure durations with microtime()
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use for lightweight operations only">
+    Side effects should be fast, local operations. Never use for I/O or network calls.
+  </Accordion>
+  
+  <Accordion title="Understand the caching">
+    Remember that side effects run ONCE and cache the result. The callable won't run again on replay.
+  </Accordion>
+  
+  <Accordion title="Use activities for external calls">
+    Any operation that touches external systems should be an activity, not a side effect.
+  </Accordion>
+  
+  <Accordion title="Test with replay">
+    Test your workflows with simulated replay to ensure side effects work correctly.
+  </Accordion>
+</AccordionGroup>
+
+## Related Patterns
+
+- [Activities](/concepts/activities) - For operations that need retry logic
+- [Timers](/patterns/timers) - For deterministic time delays
+- [Durability](/concepts/durability) - Understanding workflow time and replay

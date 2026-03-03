@@ -1,0 +1,267 @@
+---
+title: Workflows
+description: Learn how to create durable workflows using the Workflow base class and the execute() method with PHP generators
+---
+
+## Overview
+
+Workflows are the core building blocks of Durable Workflow. Each workflow extends the `Workflow` base class and implements an `execute()` method that defines the workflow's logic using PHP generators (coroutines).
+
+A workflow represents a long-running, durable process that can pause execution, wait for external events, and resume from where it left off—even after server restarts or failures.
+
+## The Workflow Base Class
+
+Every workflow extends the `Workflow` class and must implement an `execute()` method:
+
+```php
+use Workflow\Workflow;
+
+class YourWorkflow extends Workflow
+{
+    public function execute()
+    {
+        // Your workflow logic here
+    }
+}
+```
+
+The `Workflow` class provides essential functionality:
+
+```php src/Workflow.php
+public function __construct(
+    public StoredWorkflow $storedWorkflow,
+    ...$arguments
+) {
+    $this->inbox = new Inbox();
+    $this->outbox = new Outbox();
+    $this->arguments = $arguments;
+    // ...
+}
+```
+
+### Key Properties
+
+The base `Workflow` class includes several important properties:
+
+- **`$storedWorkflow`**: Reference to the persisted workflow state
+- **`$coroutine`**: The generator instance that represents your workflow execution
+- **`$index`**: Current execution position in the workflow
+- **`$now`**: The deterministic timestamp for the current execution
+- **`$replaying`**: Boolean indicating whether the workflow is replaying from history
+- **`$inbox`**: Receives incoming signals and messages
+- **`$outbox`**: Sends activities and child workflows
+
+## The execute() Method
+
+The `execute()` method is where you define your workflow's logic. It must be a generator function (using `yield`):
+
+```php
+public function execute($orderId, $customerId)
+{
+    // Workflow logic with yield statements
+    $payment = yield ActivityStub::make(ProcessPayment::class, $orderId);
+    
+    $inventory = yield ActivityStub::make(ReserveInventory::class, $orderId);
+    
+    return ['payment' => $payment, 'inventory' => $inventory];
+}
+```
+
+### Dependency Injection
+
+You can use Laravel's dependency injection in the `execute()` method:
+
+```php
+public function execute(Request $request, OrderService $orderService, $orderId)
+{
+    // $request and $orderService are automatically resolved
+    // $orderId is passed as an argument when starting the workflow
+}
+```
+
+## Generators and Coroutines
+
+Durable Workflow uses PHP generators (coroutines) to enable pausable execution. When you `yield` an activity or timer, the workflow:
+
+1. Pauses execution
+2. Persists the current state
+3. Dispatches the activity to a queue
+4. Resumes when the activity completes
+
+### How the Coroutine Works
+
+The workflow engine processes your generator step by step:
+
+```php src/Workflow.php
+$this->coroutine = $this->{'execute'}(...$this->resolveClassMethodDependencies(
+    $this->arguments,
+    $this,
+    'execute'
+));
+
+while ($this->coroutine->valid()) {
+    $this->index = WorkflowStub::getContext()->index;
+    $current = $this->coroutine->current();
+    
+    if ($current instanceof PromiseInterface) {
+        $resolved = false;
+        $exception = null;
+        
+        $current->then(function ($value) use (&$resolved, &$exception): void {
+            $resolved = true;
+            try {
+                $this->coroutine->send($value);
+            } catch (Throwable $th) {
+                $exception = $th;
+            }
+        });
+        
+        if (! $resolved) {
+            if (! $this->replaying) {
+                $this->storedWorkflow->status->transitionTo(WorkflowWaitingStatus::class);
+            }
+            return;
+        }
+    }
+}
+```
+
+Each `yield` statement returns a Promise. The workflow waits for the Promise to resolve before continuing to the next step.
+
+## Deterministic Execution
+
+Workflows must be deterministic—they produce the same output given the same inputs. This is critical for replay:
+
+<Warning>
+  Never use non-deterministic functions like `rand()`, `time()`, or database queries directly in your workflow. Use activities instead.
+</Warning>
+
+### Safe Operations in Workflows
+
+```php
+public function execute($orderId)
+{
+    // ✓ Safe - using WorkflowStub::now()
+    $currentTime = WorkflowStub::now();
+    
+    // ✓ Safe - yielding activities
+    $data = yield ActivityStub::make(GetOrderData::class, $orderId);
+    
+    // ✓ Safe - deterministic logic
+    if ($data['amount'] > 1000) {
+        yield ActivityStub::make(RequireApproval::class, $orderId);
+    }
+    
+    return $data;
+}
+```
+
+### Unsafe Operations
+
+```php
+public function execute($orderId)
+{
+    // ✗ Unsafe - non-deterministic
+    $time = time();
+    
+    // ✗ Unsafe - external calls
+    $user = User::find($orderId);
+    
+    // ✗ Unsafe - random values
+    $token = Str::random(32);
+}
+```
+
+## Workflow Configuration
+
+You can configure workflow behavior using class properties:
+
+```php
+class YourWorkflow extends Workflow
+{
+    // Queue configuration
+    public $connection = 'redis';
+    public $queue = 'workflows';
+    
+    // Retry configuration
+    public int $tries = 3;
+    public int $maxExceptions = 5;
+    public $timeout = 600; // 10 minutes
+    
+    public function execute()
+    {
+        // ...
+    }
+}
+```
+
+## Returning Values
+
+Your workflow can return any serializable value:
+
+```php
+public function execute($orderId)
+{
+    $payment = yield ActivityStub::make(ProcessPayment::class, $orderId);
+    $shipping = yield ActivityStub::make(ShipOrder::class, $orderId);
+    
+    return [
+        'orderId' => $orderId,
+        'paymentId' => $payment['id'],
+        'trackingNumber' => $shipping['tracking'],
+        'completedAt' => WorkflowStub::now()->toISOString(),
+    ];
+}
+```
+
+The return value is serialized and stored when the workflow completes:
+
+```php src/Workflow.php
+$return = $this->coroutine->getReturn();
+$this->storedWorkflow->output = Serializer::serialize($return);
+$this->storedWorkflow->status->transitionTo(WorkflowCompletedStatus::class);
+```
+
+## Error Handling
+
+When a workflow encounters an exception, it transitions to a failed state:
+
+```php src/Workflow.php
+public function failed(Throwable $throwable): void
+{
+    try {
+        $this->storedWorkflow->toWorkflow()
+            ->fail($throwable);
+    } catch (TransitionNotFound) {
+        return;
+    }
+}
+```
+
+You can handle errors within your workflow:
+
+```php
+public function execute($orderId)
+{
+    try {
+        $payment = yield ActivityStub::make(ProcessPayment::class, $orderId);
+    } catch (PaymentFailedException $e) {
+        // Handle payment failure
+        yield ActivityStub::make(NotifyCustomer::class, $orderId, $e->getMessage());
+        return ['status' => 'payment_failed'];
+    }
+    
+    return ['status' => 'completed'];
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Activities" icon="bolt" href="/concepts/activities">
+    Learn how to execute side effects using activities
+  </Card>
+  <Card title="WorkflowStub" icon="wand-magic-sparkles" href="/concepts/workflow-stub">
+    Discover how to interact with running workflows
+  </Card>
+</CardGroup>

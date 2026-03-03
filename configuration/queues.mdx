@@ -1,0 +1,202 @@
+---
+title: Queue Configuration
+description: Configure Laravel queues for workflow execution
+---
+
+Durable Workflow relies on Laravel's queue system to execute workflows and activities asynchronously. Proper queue configuration is essential for reliable workflow execution.
+
+## Laravel Queue Dependency
+
+Durable Workflow is built on top of Laravel's queue infrastructure, which is included in the Laravel framework:
+
+```json
+"require": {
+  "php": "^8.1",
+  "laravel/framework": "^9.0|^10.0|^11.0|^12.0|^13.0"
+}
+```
+
+## Queue Connection
+
+Configure your queue connection in `config/queue.php`. Durable Workflow supports any Laravel queue driver:
+
+- **Database** - Simple, no additional infrastructure
+- **Redis** - High performance, recommended for production
+- **Amazon SQS** - Managed queue service
+- **Beanstalkd** - Specialized queue server
+
+### Database Driver Example
+
+```php
+// config/queue.php
+'connections' => [
+    'database' => [
+        'driver' => 'database',
+        'table' => 'jobs',
+        'queue' => 'default',
+        'retry_after' => 90,
+    ],
+],
+```
+
+### Redis Driver Example
+
+```php
+// config/queue.php
+'connections' => [
+    'redis' => [
+        'driver' => 'redis',
+        'connection' => 'default',
+        'queue' => env('REDIS_QUEUE', 'default'),
+        'retry_after' => 90,
+        'block_for' => null,
+    ],
+],
+```
+
+## Per-Workflow Queue Configuration
+
+You can specify different queue connections and queues for individual workflows using `WorkflowOptions`:
+
+```php
+use Workflow\WorkflowOptions;
+
+$options = new WorkflowOptions(
+    connection: 'redis',
+    queue: 'workflows'
+);
+
+Workflow::start(MyWorkflow::class, ['data'], $options);
+```
+
+### Using the set() Method
+
+```php
+$options = WorkflowOptions::set([
+    'connection' => 'redis',
+    'queue' => 'high-priority'
+]);
+
+Workflow::start(ImportWorkflow::class, [$file], $options);
+```
+
+## Queue Workers
+
+Run queue workers to process workflow jobs:
+
+### Single Worker
+
+```bash
+php artisan queue:work
+```
+
+### Specific Connection
+
+```bash
+php artisan queue:work redis
+```
+
+### Specific Queue
+
+```bash
+php artisan queue:work --queue=workflows
+```
+
+### Multiple Queues with Priority
+
+```bash
+php artisan queue:work --queue=high-priority,workflows,default
+```
+
+## Production Considerations
+
+### Supervisor Configuration
+
+Use Supervisor to keep queue workers running in production:
+
+```ini
+[program:workflow-worker]
+process_name=%(program_name)s_%(process_num)02d
+command=php /path/to/artisan queue:work redis --sleep=3 --tries=3 --max-time=3600
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+user=www-data
+numprocs=4
+redirect_stderr=true
+stdout_logfile=/path/to/logs/worker.log
+stopwaitsecs=3600
+```
+
+### Horizon (Redis Only)
+
+For Redis-based queues, consider using Laravel Horizon for advanced queue monitoring:
+
+```bash
+composer require laravel/horizon
+php artisan horizon:install
+php artisan horizon
+```
+
+## Queue Configuration Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Redis for Production">
+    Redis provides better performance and reliability than the database driver for production workloads.
+  </Accordion>
+  
+  <Accordion title="Separate Workflow Queues">
+    Use dedicated queues for workflows to isolate them from other application jobs:
+    
+    ```php
+    WorkflowOptions::set(['queue' => 'workflows'])
+    ```
+  </Accordion>
+  
+  <Accordion title="Configure Retry Logic">
+    Set appropriate `retry_after` values based on your workflow execution times:
+    
+    ```php
+    'retry_after' => 300, // 5 minutes
+    ```
+  </Accordion>
+  
+  <Accordion title="Monitor Queue Health">
+    Use Laravel Horizon or custom monitoring to track queue depth and failed jobs.
+  </Accordion>
+</AccordionGroup>
+
+## Failed Jobs
+
+Configure failed job handling in `config/queue.php`:
+
+```php
+'failed' => [
+    'driver' => env('QUEUE_FAILED_DRIVER', 'database'),
+    'database' => env('DB_CONNECTION', 'mysql'),
+    'table' => 'failed_jobs',
+],
+```
+
+View failed jobs:
+
+```bash
+php artisan queue:failed
+```
+
+Retry failed jobs:
+
+```bash
+php artisan queue:retry all
+```
+
+## WorkflowOptions Reference
+
+<ParamField path="connection" type="string" default="null">
+  The queue connection to use for this workflow. If null, uses the default connection.
+</ParamField>
+
+<ParamField path="queue" type="string" default="null">
+  The queue name to use for this workflow. If null, uses the default queue.
+</ParamField>
