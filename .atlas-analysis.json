@@ -1,0 +1,175 @@
+{
+  "projectType": "framework",
+  "projectName": "Durable Workflow",
+  "projectDescription": "Durable workflow engine for writing long-running persistent distributed workflows in PHP powered by Laravel Queues",
+  "theme": "aspen",
+  "primaryColor": "#2563eb",
+  "lightColor": "#3b82f6",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/workflows",
+              "concepts/activities",
+              "concepts/workflow-stub",
+              "concepts/state-management",
+              "concepts/durability"
+            ]
+          },
+          {
+            "group": "Workflow Patterns",
+            "pages": [
+              "patterns/child-workflows",
+              "patterns/signals",
+              "patterns/queries-and-updates",
+              "patterns/timers",
+              "patterns/await-conditions",
+              "patterns/sagas",
+              "patterns/continue-as-new",
+              "patterns/side-effects"
+            ]
+          },
+          {
+            "group": "Advanced Features",
+            "pages": [
+              "advanced/versioning",
+              "advanced/webhooks",
+              "advanced/authentication",
+              "advanced/error-handling",
+              "advanced/retries",
+              "advanced/middleware",
+              "advanced/serialization"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/overview",
+              "configuration/queues",
+              "configuration/database",
+              "configuration/options"
+            ]
+          },
+          {
+            "group": "Monitoring",
+            "pages": [
+              "monitoring/waterline",
+              "monitoring/events",
+              "monitoring/logging"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/user-signup",
+              "examples/payment-processing",
+              "examples/data-pipeline",
+              "examples/microservices-orchestration",
+              "examples/ai-workflows"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Classes",
+            "pages": [
+              "api/workflow",
+              "api/activity",
+              "api/workflow-stub",
+              "api/child-workflow-stub",
+              "api/activity-stub"
+            ]
+          },
+          {
+            "group": "Helper Functions",
+            "pages": [
+              "api/functions/activity",
+              "api/functions/child",
+              "api/functions/await",
+              "api/functions/timer",
+              "api/functions/side-effect",
+              "api/functions/continue-as-new",
+              "api/functions/versioning"
+            ]
+          },
+          {
+            "group": "Attributes",
+            "pages": [
+              "api/attributes/signal-method",
+              "api/attributes/query-method",
+              "api/attributes/update-method",
+              "api/attributes/webhook"
+            ]
+          },
+          {
+            "group": "Events",
+            "pages": [
+              "api/events/workflow-events",
+              "api/events/activity-events"
+            ]
+          },
+          {
+            "group": "Models",
+            "pages": [
+              "api/models/stored-workflow",
+              "api/models/stored-workflow-log",
+              "api/models/stored-workflow-exception"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Durable execution with automatic state persistence",
+    "Workflow orchestration using generators and promises",
+    "Activity execution with retry and error handling",
+    "Child workflow support for complex hierarchies",
+    "Signals, queries, and updates for workflow interaction",
+    "Timers and await conditions for time-based logic",
+    "Saga pattern for distributed transactions",
+    "Workflow versioning for safe evolution",
+    "Webhook integration for external triggers",
+    "Laravel Queue integration for async execution",
+    "Waterline monitoring dashboard",
+    "Event-driven architecture"
+  ],
+  "publicApiSurface": [
+    "Workflow::execute()",
+    "Activity::execute()",
+    "WorkflowStub::make()",
+    "WorkflowStub::load()",
+    "WorkflowStub::start()",
+    "activity()",
+    "child()",
+    "await()",
+    "timer()",
+    "awaitWithTimeout()",
+    "sideEffect()",
+    "continueAsNew()",
+    "getVersion()",
+    "all()",
+    "async()",
+    "SignalMethod",
+    "QueryMethod",
+    "UpdateMethod",
+    "Webhook",
+    "Webhooks::routes()"
+  ]
+}
